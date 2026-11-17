@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 from .envfile import apply_env_defaults, parse_env_file
-from .tui import run_tui
+from .tui_runtime import run_tui_recorded as run_tui
 
 
 DEFAULT_TUI_ENV_FILE = Path("agent-pbx/tui.env")

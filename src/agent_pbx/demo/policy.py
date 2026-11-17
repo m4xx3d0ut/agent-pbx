@@ -64,6 +64,7 @@ SAFE_TERMINAL_DIMENSIONS = {
     "COLUMNS": (40, 300),
     "ROWS": (12, 120),
 }
+TEXTUAL_WEB_DRIVER = "textual.drivers.web_driver:WebDriver"
 
 
 def sensitive_environment_names(environ: Mapping[str, str]) -> tuple[str, ...]:
@@ -105,6 +106,11 @@ def build_public_demo_environment(
         except (TypeError, ValueError, OverflowError):
             continue
         result[name] = str(min(maximum, max(minimum, value)))
+    # The browser service sets this exact in-process driver before launching
+    # the disposable child. Preserve only the known WebDriver identifier; an
+    # arbitrary import path would turn an environment value into code loading.
+    if str(environ.get("TEXTUAL_DRIVER") or "") == TEXTUAL_WEB_DRIVER:
+        result["TEXTUAL_DRIVER"] = TEXTUAL_WEB_DRIVER
     path = str(result.get("PATH") or os.defpath)
     if path_prefix is not None:
         path = f"{path_prefix}{os.pathsep}{path}"

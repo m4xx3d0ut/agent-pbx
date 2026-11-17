@@ -1852,6 +1852,19 @@ With tmux-owned scrolling enabled, Page Up enters and scrolls copy mode; arrows
 and Page Up/Page Down then navigate history. `/tmux scrollback` remains the
 explicit Android/Termux and SSH fallback.
 
+Each TUI process also records bounded, private lifecycle evidence under
+`${XDG_DATA_HOME:-~/.local/share}/agent-pbx/tui-runtime`. `events.jsonl`
+contains start, clean-exit, interrupted-exit, crash, and stale-run events;
+`stderr/` contains a redacted per-run stderr capture; and `active/` contains a
+PID/start-time-qualified marker while a client is alive. A hard-killed client
+is recognized on the next launch and its marker is retained under `unclean/`.
+This evidence is intentionally separate from managed tmux runtimes: recording
+or recovering a TUI client never stops Codex or its runtime pane. Files are
+user-private, bounded by rotation/retention, and redact the configured PBX
+token plus common bearer/query credential forms. Set
+`AGENT_PBX_TUI_RUNTIME_ROOT` only when a private alternate evidence directory
+is required.
+
 The retained capture fallback uses `AGENT_PBX_TUI_TMUX_CAPTURE_LINES` and
 `AGENT_PBX_TUI_TMUX_REFRESH_SECONDS`. Set
 `AGENT_PBX_TUI_COMPAT_TERMINAL_CAPTURE=0` only after native-terminal parity is

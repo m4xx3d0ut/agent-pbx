@@ -117,6 +117,33 @@ def test_public_demo_environment_preserves_geometry_across_session_sanitization(
     assert session_environment["XDG_RUNTIME_DIR"] == str(session_runtime)
 
 
+def test_public_demo_environment_preserves_only_known_textual_web_driver(
+    tmp_path: Path,
+) -> None:
+    home = ensure_private_directory(tmp_path / "home")
+    runtime = ensure_private_directory(tmp_path / "runtime")
+
+    known = build_public_demo_environment(
+        {
+            "PATH": os.defpath,
+            "TEXTUAL_DRIVER": "textual.drivers.web_driver:WebDriver",
+        },
+        home=home,
+        runtime_dir=runtime,
+    )
+    arbitrary = build_public_demo_environment(
+        {
+            "PATH": os.defpath,
+            "TEXTUAL_DRIVER": "untrusted.module:Driver",
+        },
+        home=home,
+        runtime_dir=runtime,
+    )
+
+    assert known["TEXTUAL_DRIVER"] == "textual.drivers.web_driver:WebDriver"
+    assert "TEXTUAL_DRIVER" not in arbitrary
+
+
 def test_public_demo_environment_rejects_credentials_and_wrong_roots(
     tmp_path: Path,
 ) -> None:

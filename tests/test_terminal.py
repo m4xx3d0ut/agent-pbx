@@ -550,6 +550,19 @@ def test_disposable_client_restart_keeps_runtime_session_alive() -> None:
     env.pop("TMUX_PANE", None)
     env.setdefault("TERM", "xterm-256color")
     try:
+        runtime_identity = subprocess.run(
+            [
+                *prefix,
+                "display-message",
+                "-p",
+                "-t",
+                "runtime:0.0",
+                "#{pane_pid}:#{pane_start_command}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         first = PtyProcess(
             [*prefix, "attach-session", "-t", "runtime"], env=env
         ).start()
@@ -559,11 +572,43 @@ def test_disposable_client_restart_keeps_runtime_session_alive() -> None:
         assert subprocess.run(
             [*prefix, "has-session", "-t", "runtime"], capture_output=True
         ).returncode == 0
+        assert (
+            subprocess.run(
+                [
+                    *prefix,
+                    "display-message",
+                    "-p",
+                    "-t",
+                    "runtime:0.0",
+                    "#{pane_pid}:#{pane_start_command}",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            == runtime_identity
+        )
         second = PtyProcess(
             [*prefix, "attach-session", "-t", "runtime"], env=env
         ).start()
         output = second.read_available(timeout=0.25)
         assert second.alive, output.decode("utf-8", errors="replace")
+        assert (
+            subprocess.run(
+                [
+                    *prefix,
+                    "display-message",
+                    "-p",
+                    "-t",
+                    "runtime:0.0",
+                    "#{pane_pid}:#{pane_start_command}",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            == runtime_identity
+        )
     finally:
         if first is not None:
             first.close()

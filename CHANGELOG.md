@@ -9,6 +9,10 @@
   OIDC publication authority.
 - Add receipt-bearing, idempotent Operator terminal delivery with typed
   readiness outcomes and exact managed-runtime identity evidence.
+- Add bounded, user-private TUI run evidence with start/exit events,
+  PID/start-time-qualified active markers, stale-run recovery, and redacted
+  per-run stderr and exception traces. The disposable TUI journal remains
+  independent from managed tmux and Codex runtime ownership.
 
 ### Changed
 
@@ -35,6 +39,12 @@
   prompt, and writer lease all remain valid through injection. Explicit nohup
   targets retain queue fallback; startup, model, update, and thinking overlays
   return typed non-success outcomes.
+- Preserve the exact Textual WebDriver across both hardened public-demo
+  environment sanitization boundaries without accepting arbitrary driver
+  import paths.
+- Cover selected native root-Operator restart, explicit embedded-client
+  detach, Agents-pane refocus, and disposable tmux-client replacement without
+  changing or terminating the managed Codex runtime identity.
 
 ## v2.4.0 - 2026-11-13
 

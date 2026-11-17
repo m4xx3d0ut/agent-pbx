@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from agent_pbx.tui import run_tui
+from agent_pbx.tui_runtime import run_tui_recorded
 
 from .contract import DEMO_SCENARIO_ID
 from .fake_joplin import create_joplin_fixture_server
@@ -847,7 +847,7 @@ class DemoSession:
         os.environ.clear()
         os.environ.update(environment)
         try:
-            run_tui(server=self.server_url, token=self.token)
+            run_tui_recorded(server=self.server_url, token=self.token)
         finally:
             self._stop_event.set()
             signal.signal(signal.SIGTERM, previous_term)

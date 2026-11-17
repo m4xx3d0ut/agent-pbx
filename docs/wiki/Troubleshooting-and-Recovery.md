@@ -1,7 +1,7 @@
 # Troubleshooting and Recovery
 
-> **Applies to:** Agent PBX 2.3.x
-> **Last reviewed:** 2026-10-10
+> **Applies to:** Agent PBX 2.3.x and later
+> **Last reviewed:** 2026-11-17
 
 Start with read-only posture and preserve runtime evidence:
 
@@ -26,6 +26,35 @@ agent-pbx runtime attach --entity codex-agent-pbx
 Use `--read-only` for diagnosis. Detaching this client leaves the managed
 runtime running. On another host, generate an SSH attachment with
 `agent-pbx remote ssh-attach`.
+
+## TUI exits or becomes unresponsive
+
+Do not kill or recreate the managed runtime merely because the disposable TUI
+client stopped. Inspect the bounded local run evidence first:
+
+```bash
+tail -n 100 ~/.local/share/agent-pbx/tui-runtime/events.jsonl
+ls -lt ~/.local/share/agent-pbx/tui-runtime/stderr/
+ls -lt ~/.local/share/agent-pbx/tui-runtime/unclean/
+```
+
+Every launch creates a PID/process-start-qualified marker in `active/`. A
+normal quit, handled interrupt, or Python exception writes a terminal event and
+removes the marker. A hard kill cannot execute cleanup; the next TUI launch
+recognizes the dead process, records `tui_unclean_exit_detected`, and moves the
+marker to `unclean/` without touching managed tmux or Codex state. Live markers
+from another TUI client are not reaped.
+
+Per-run stderr and exception tracebacks are stored with user-only permissions,
+bounded retention, and credential redaction. The configured PBX token and
+common bearer/query token forms are removed, but operators should still review
+diagnostic evidence before sharing it. Set `AGENT_PBX_TUI_RUNTIME_ROOT` to a
+private alternate directory when the standard XDG state location is unsuitable.
+
+After preserving the evidence, relaunch with the normal local wrapper (for
+example `apbx local`) and verify the selected entity's mapping and writer lease.
+The TUI client should reattach to the existing native runtime; it should not
+respawn a healthy managed Codex pane.
 
 ## Native terminal falls back to capture
 

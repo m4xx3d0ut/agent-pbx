@@ -87,7 +87,7 @@ from .setup_assistant import (
 )
 from .workerbee_snapshot_policy import WORKERBEE_WORKFLOW_PRESETS
 from .store import Store
-from .tui import run_tui
+from .tui_runtime import run_tui_recorded as run_tui
 from .uat import (
     cleanup_operator_kb_flow_uat,
     compare_operator_kb_flow_uat_runs,

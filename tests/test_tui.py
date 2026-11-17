@@ -518,7 +518,10 @@ def test_tui_constructs() -> None:
     assert ("b", "back", "Back") in app.BINDINGS
 
 
-def test_run_tui_selects_native_default_only_for_local_server(monkeypatch) -> None:
+def test_run_tui_selects_native_default_only_for_local_server(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     calls: list[dict[str, object]] = []
 
     class FakeApp:
@@ -529,6 +532,7 @@ def test_run_tui_selects_native_default_only_for_local_server(monkeypatch) -> No
             calls[-1]["ran"] = True
 
     monkeypatch.setattr("agent_pbx.tui.AgentPBXTUI", FakeApp)
+    monkeypatch.setenv("AGENT_PBX_TUI_RUNTIME_ROOT", str(tmp_path))
 
     run_tui(server="http://127.0.0.1:8765", token="local")
     run_tui(server="https://pbx.example.test", token="remote")
@@ -20565,6 +20569,189 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
     assert app.tmux_agent_targets["operator-0"] == "%30"
     assert captures
     assert set(captures) == {"operator-0"}
+
+
+async def test_tui_selected_native_root_restart_preserves_client_and_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+    )
+    agent_id = "operator-0"
+    mapping = {
+        "entity_id": agent_id,
+        "state": "ready",
+        "server_id": "server-a",
+        "socket_path": "/tmp/agent-pbx-runtime.sock",
+        "session_name": "agent-pbx-operators",
+        "window_id": "@7",
+        "pane_id": "%30",
+        "pane_pid": 300,
+        "process_start_ticks": 30,
+        "codex_session_id": "current-session",
+    }
+    pane = tmux_support.TmuxPane(
+        "agent-pbx-operators",
+        "0",
+        "0",
+        "%30",
+        True,
+        "node",
+        agent_id,
+        str(Path.cwd()),
+        120,
+        40,
+        0,
+        window_name=agent_id,
+        window_id="@7",
+    )
+    restarted: list[str] = []
+    refreshed: list[str] = []
+    captures: list[str] = []
+    released: list[str] = []
+
+    class FakeProcess:
+        alive = True
+        columns = 80
+        rows = 24
+
+        def read_available(self, **_kwargs: object) -> bytes:
+            return b""
+
+        def write(self, _data: bytes) -> None:
+            return None
+
+        def close(self) -> None:
+            self.alive = False
+
+        def resize(self, columns: int, rows: int) -> None:
+            self.columns = columns
+            self.rows = rows
+
+    async def fetch(_agent_id: str) -> dict[str, object]:
+        return mapping
+
+    async def lifecycle(
+        _agent_id: str,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(pane=pane, pane_id=pane.pane_id)
+
+    async def relaunch(
+        requested_agent_id: str,
+        requested_pane: tmux_support.TmuxPane,
+        **_kwargs: object,
+    ) -> bool:
+        assert app.is_running
+        assert requested_agent_id == agent_id
+        assert requested_pane is pane
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        assert surface.attached
+        assert surface.has_focus
+        restarted.append(requested_agent_id)
+        return True
+
+    async def refresh_mapping(requested_agent_id: str, pane_id: str) -> bool:
+        assert app.is_running
+        assert pane_id == "%30"
+        refreshed.append(requested_agent_id)
+        return True
+
+    async def no_refresh() -> None:
+        return None
+
+    async def load_capture(requested_agent_id: str) -> None:
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        assert surface.attached
+        captures.append(requested_agent_id)
+        surface.focus()
+
+    async def release(requested_agent_id: str) -> bool:
+        released.append(requested_agent_id)
+        return True
+
+    # Keep the test deterministic: the assertion-bearing capture stub below
+    # belongs to the explicit restart call, not the independent periodic timer.
+    app.refresh_tmux_capture_if_active = no_refresh  # type: ignore[method-assign]
+    async with app.run_test(size=(120, 32)) as pilot:
+        app.agents = {
+            agent_id: {
+                "agent_id": agent_id,
+                "agent_type": "operator",
+                "project": "agent-pbx-operator",
+                "name": agent_id,
+                "pbx_active": True,
+                "status": "working",
+                "last_seen_at": time.time(),
+                "metadata": {
+                    "agent_type": "operator",
+                    "operator_role": "root",
+                    "cwd": str(Path.cwd()),
+                    "codex_session_id": "current-session",
+                    "launched_by": "agent-pbx-tui",
+                },
+            }
+        }
+        app.selected_agent_id = agent_id
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        app.tmux_direct_agent_modes[agent_id] = True
+        app.tmux_runtime_mapping_by_agent[agent_id] = mapping
+        app.tmux_agent_targets[agent_id] = "%30"
+        app.embedded_terminal_agent_id = agent_id
+        app.embedded_terminal_target = "server-a:%30"
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        process = FakeProcess()
+        surface.process = process  # type: ignore[assignment]
+        surface.target = "server-a:%30"
+        app.apply_tmux_class()
+        surface.focus()
+        await pilot.pause()
+
+        monkeypatch.setattr(app, "fetch_tmux_runtime_mapping", fetch)
+        monkeypatch.setattr(app, "managed_tmux_lifecycle_target", lifecycle)
+        monkeypatch.setattr(app, "relaunch_operator_root_codex", relaunch)
+        monkeypatch.setattr(
+            app,
+            "refresh_tmux_runtime_mapping_after_restart",
+            refresh_mapping,
+        )
+        monkeypatch.setattr(app, "refresh_agents", no_refresh)
+        monkeypatch.setattr(app, "refresh_events", no_refresh)
+        monkeypatch.setattr(app, "load_tmux_capture", load_capture)
+        monkeypatch.setattr(app, "release_tmux_writer_lease", release)
+
+        await app.restart_selected_operator(agent_id=agent_id)
+        await pilot.pause()
+
+        assert app.is_running
+        assert surface.attached
+        assert process.alive
+        assert surface.has_focus
+        assert app.embedded_terminal_agent_id == agent_id
+        assert app.embedded_terminal_target == "server-a:%30"
+        assert released == []
+
+        await app.detach_embedded_tmux_terminal(release_lease=True)
+        await pilot.pause()
+        assert app.is_running
+        assert not surface.attached
+        assert not process.alive
+        assert app.embedded_terminal_agent_id is None
+        assert app.embedded_terminal_target is None
+
+        agents = app.query_one("#agents", DataTable)
+        agents.focus()
+        await pilot.pause()
+        assert agents.has_focus
+        assert app.is_running
+
+    assert restarted == [agent_id]
+    assert refreshed == [agent_id]
+    assert captures == [agent_id]
+    assert released == [agent_id]
 
 
 async def test_tui_refuses_sol_restart_when_another_pane_owns_the_resume_session(
