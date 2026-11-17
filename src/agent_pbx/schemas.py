@@ -452,6 +452,19 @@ class AgentResponse(BaseModel):
     workflow_secondary_at: float | None = None
     workflow_precedence_reason: str = "no_active_workflow"
     workflow_report_superseded: bool = False
+    mcp_inventory_state: Literal[
+        "no_runtime",
+        "unavailable",
+        "unknown",
+        "current",
+        "stale",
+    ] = "unavailable"
+    mcp_current_tool_manifest_sha256: str | None = None
+    mcp_session_tool_manifest_sha256: str | None = None
+    mcp_current_tool_count: int = 0
+    mcp_runtime_mapping_state: str | None = None
+    mcp_refresh_required: bool = False
+    mcp_refresh_recommended: bool = False
 
 
 class OperatorAlertAcknowledgementItem(BaseModel):

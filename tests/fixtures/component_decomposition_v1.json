@@ -9,31 +9,31 @@
       "lines": 792
     },
     "src/agent_pbx/store.py": {
-      "ast_nodes": 53577,
-      "bytes": 443639,
+      "ast_nodes": 55684,
+      "bytes": 461727,
       "classes": 2,
-      "functions": 374,
-      "imports": 18,
-      "lines": 11404
+      "functions": 380,
+      "imports": 19,
+      "lines": 11832
     },
     "src/agent_pbx/tui.py": {
-      "ast_nodes": 172192,
-      "bytes": 1305766,
+      "ast_nodes": 172578,
+      "bytes": 1308322,
       "classes": 20,
-      "functions": 1191,
+      "functions": 1193,
       "imports": 71,
-      "lines": 32953
+      "lines": 33014
     }
   },
   "baseline_commit": "56f46179863fed13f339ab3e55481a895b994921",
   "extracted_module_maxima": {
     "src/agent_pbx/api_routes/operator.py": {
-      "ast_nodes": 7735,
-      "bytes": 68370,
+      "ast_nodes": 7740,
+      "bytes": 68427,
       "classes": 0,
       "functions": 85,
       "imports": 9,
-      "lines": 1886
+      "lines": 1887
     },
     "src/agent_pbx/api_routes/workerbee.py": {
       "ast_nodes": 6337,
@@ -44,12 +44,12 @@
       "lines": 1339
     },
     "src/agent_pbx/persistence/schema.py": {
-      "ast_nodes": 722,
-      "bytes": 73231,
+      "ast_nodes": 733,
+      "bytes": 73493,
       "classes": 1,
       "functions": 8,
       "imports": 3,
-      "lines": 1671
+      "lines": 1678
     },
     "src/agent_pbx/ui/button_router.py": {
       "ast_nodes": 2857,
@@ -213,8 +213,10 @@
       "merge_operator_fork_metadata",
       "prepare_managed_runtime_stop",
       "project_operator_broker_approval",
+      "reconcile_operator_campaign_terminal_state",
       "reconcile_operator_terminal_report",
       "record_joplin_conflict",
+      "rehydrate_managed_caller_runtime",
       "request_or_reuse_dynamic_resource",
       "request_or_reuse_model_elevation",
       "start_joplin_log",
@@ -256,6 +258,26 @@
         "decorators": [],
         "name": "init",
         "signature": "self"
+      },
+      {
+        "async": false,
+        "decorators": [
+          "staticmethod"
+        ],
+        "name": "_system_metadata_json",
+        "signature": "conn: sqlite3.Connection, key: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "get_system_metadata_json",
+        "signature": "self, key: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "set_system_metadata_json",
+        "signature": "self, key: str, value: Mapping[str, Any]"
       },
       {
         "async": false,
@@ -636,6 +658,12 @@
       {
         "async": false,
         "decorators": [],
+        "name": "rehydrate_managed_caller_runtime",
+        "signature": "self, entity_id: str, *, metadata: dict[str, Any], clear_metadata_keys: tuple[str, ...]=(), runtime_mapping: dict[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [],
         "name": "register_agent",
         "signature": "self, request: AgentRegisterRequest"
       },
@@ -746,6 +774,12 @@
         "decorators": [],
         "name": "merge_operator_fork_metadata",
         "signature": "self, fork_agent_id: str, metadata: Mapping[str, Any]"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "_add_mcp_inventory_summary",
+        "signature": "self, conn: sqlite3.Connection, agent: dict[str, Any], *, manifest: Mapping[str, Any]"
       },
       {
         "async": false,
@@ -1106,6 +1140,12 @@
         "decorators": [],
         "name": "update_operator_campaign",
         "signature": "self, campaign_id: str, *, status: str | None=None, summary: str | None=None, complete: bool | None=None"
+      },
+      {
+        "async": false,
+        "decorators": [],
+        "name": "reconcile_operator_campaign_terminal_state",
+        "signature": "self, campaign_id: str"
       },
       {
         "async": false,
@@ -2837,7 +2877,7 @@
       "table:workerbee_workspace_policies",
       "table:workerbee_workspace_transitions"
     ],
-    "schema_sha256": "94bff9625b62b810f972f437dbdc3498d03ea29d9d82e815f33ed4b81227adcc",
-    "schema_version": 45
+    "schema_sha256": "70602a39fc805c8d04d84ab74816aaee5f0bb132f6641b3d8a9b78e8750e8839",
+    "schema_version": 46
   }
 }

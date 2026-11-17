@@ -4,8 +4,71 @@ import threading
 
 import pytest
 
+from agent_pbx.mcp_inventory import (
+    MCP_TOOL_MANIFEST_METADATA_KEY,
+    MCP_TOOL_MANIFEST_STORE_KEY,
+)
 from agent_pbx.schemas import AgentRegisterRequest, ReportCreateRequest
 from agent_pbx.store import SCHEMA_VERSION, STALE_WORKING_SECONDS, Store
+
+
+def test_agent_summary_projects_mcp_inventory_freshness(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    current_digest = "a" * 64
+    store.set_system_metadata_json(
+        MCP_TOOL_MANIFEST_STORE_KEY,
+        {
+            "schema_version": 1,
+            "tool_count": 71,
+            "sha256": current_digest,
+            "tools": [],
+        },
+    )
+    entries = (
+        ("no-runtime", None),
+        ("unknown-runtime", None),
+        ("current-runtime", current_digest),
+        ("stale-runtime", "b" * 64),
+    )
+    for index, (agent_id, digest) in enumerate(entries, start=1):
+        metadata = {
+            "cwd": str(tmp_path / agent_id),
+            **(
+                {MCP_TOOL_MANIFEST_METADATA_KEY: digest}
+                if digest is not None
+                else {}
+            ),
+        }
+        store.register_agent(
+            AgentRegisterRequest(
+                agent_id=agent_id,
+                project="demo",
+                metadata=metadata,
+            )
+        )
+        if agent_id != "no-runtime":
+            store.upsert_tmux_runtime_mapping(
+                entity_id=agent_id,
+                server_mode="dedicated",
+                server_id="server-a",
+                socket_path="/tmp/server-a.sock",
+                session_name=f"runtime-{agent_id}",
+                pane_id=f"%{index}",
+                state="ready",
+            )
+
+    agents = {agent["agent_id"]: agent for agent in store.list_agents()}
+    assert agents["no-runtime"]["mcp_inventory_state"] == "no_runtime"
+    assert agents["no-runtime"]["mcp_refresh_recommended"] is False
+    assert agents["unknown-runtime"]["mcp_inventory_state"] == "unknown"
+    assert agents["unknown-runtime"]["mcp_refresh_recommended"] is True
+    assert agents["unknown-runtime"]["mcp_refresh_required"] is False
+    assert agents["current-runtime"]["mcp_inventory_state"] == "current"
+    assert agents["current-runtime"]["mcp_refresh_recommended"] is False
+    assert agents["stale-runtime"]["mcp_inventory_state"] == "stale"
+    assert agents["stale-runtime"]["mcp_refresh_required"] is True
+    assert agents["stale-runtime"]["mcp_current_tool_count"] == 71
 
 
 def test_agent_summary_keeps_pending_handoff_approval_durable(

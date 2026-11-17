@@ -19,6 +19,7 @@ from .host_process_evidence import (
 )
 from .joplin import JoplinService
 from .issues import IssueService
+from .mcp_inventory import publish_mcp_tool_manifest
 from .operator import OperatorService, operator_runbook_payload
 from .terminal_delivery import IdleTargetDeliveryError
 from .operator_broker import OperatorBrokerService
@@ -1693,6 +1694,7 @@ def build_mcp_server(
         )
         return command
 
+    publish_mcp_tool_manifest(mcp, store)
     return mcp
 
 

@@ -975,6 +975,16 @@
     "path": "/v2/agents/managed-launch/preview"
   },
   {
+    "method": "POST",
+    "operation_id": "apply_managed_caller_rehydration_v2_agents_rehydrate_post",
+    "path": "/v2/agents/rehydrate"
+  },
+  {
+    "method": "POST",
+    "operation_id": "preview_managed_caller_rehydration_v2_agents_rehydrate_preview_post",
+    "path": "/v2/agents/rehydrate/preview"
+  },
+  {
     "method": "GET",
     "operation_id": "get_agent_codex_runtime_v2_agents__agent_id__codex_runtime_get",
     "path": "/v2/agents/{agent_id}/codex-runtime"
@@ -1178,6 +1188,11 @@
     "method": "POST",
     "operation_id": "prepare_managed_runtime_stop_v2_lifecycle__entity_id__managed_stop_prepare_post",
     "path": "/v2/lifecycle/{entity_id}/managed-stop/prepare"
+  },
+  {
+    "method": "GET",
+    "operation_id": "get_mcp_tool_manifest_v2_mcp_tool_manifest_get",
+    "path": "/v2/mcp/tool-manifest"
   },
   {
     "method": "GET",

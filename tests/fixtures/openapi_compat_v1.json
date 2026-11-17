@@ -556,6 +556,39 @@
             "title": "Last Seen At",
             "type": "number"
           },
+          "latest_active_campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Active Campaign Id"
+          },
+          "latest_active_campaign_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Active Campaign Status"
+          },
+          "latest_active_campaign_updated_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Active Campaign Updated At"
+          },
           "latest_completion_delivery_id": {
             "anyOf": [
               {
@@ -582,6 +615,28 @@
             "default": false,
             "title": "Latest Report Action Required",
             "type": "boolean"
+          },
+          "latest_report_age_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Report Age Seconds"
+          },
+          "latest_report_campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Report Campaign Id"
           },
           "latest_report_created_at": {
             "anyOf": [
@@ -641,6 +696,66 @@
             "default": false,
             "title": "Latest Report Suppress Tui Alerts",
             "type": "boolean"
+          },
+          "mcp_current_tool_count": {
+            "default": 0,
+            "title": "Mcp Current Tool Count",
+            "type": "integer"
+          },
+          "mcp_current_tool_manifest_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mcp Current Tool Manifest Sha256"
+          },
+          "mcp_inventory_state": {
+            "default": "unavailable",
+            "enum": [
+              "no_runtime",
+              "unavailable",
+              "unknown",
+              "current",
+              "stale"
+            ],
+            "title": "Mcp Inventory State",
+            "type": "string"
+          },
+          "mcp_refresh_recommended": {
+            "default": false,
+            "title": "Mcp Refresh Recommended",
+            "type": "boolean"
+          },
+          "mcp_refresh_required": {
+            "default": false,
+            "title": "Mcp Refresh Required",
+            "type": "boolean"
+          },
+          "mcp_runtime_mapping_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mcp Runtime Mapping State"
+          },
+          "mcp_session_tool_manifest_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mcp Session Tool Manifest Sha256"
           },
           "metadata": {
             "additionalProperties": true,
@@ -830,10 +945,64 @@
             "title": "Workflow Label",
             "type": "string"
           },
+          "workflow_precedence_reason": {
+            "default": "no_active_workflow",
+            "title": "Workflow Precedence Reason",
+            "type": "string"
+          },
+          "workflow_primary_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Primary At"
+          },
           "workflow_reason": {
             "default": "No active Operator workflow",
             "title": "Workflow Reason",
             "type": "string"
+          },
+          "workflow_report_superseded": {
+            "default": false,
+            "title": "Workflow Report Superseded",
+            "type": "boolean"
+          },
+          "workflow_secondary_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Secondary At"
+          },
+          "workflow_secondary_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Secondary Source"
+          },
+          "workflow_secondary_subject_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Secondary Subject Id"
           },
           "workflow_source": {
             "default": "agent_status",
@@ -4934,6 +5103,78 @@
         "title": "ManagedAgentLaunchRequest",
         "type": "object"
       },
+      "ManagedCallerRehydrateRequest": {
+        "properties": {
+          "agent_id": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "mode": {
+            "default": "fresh",
+            "enum": [
+              "fresh",
+              "fork_source"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "preview_token": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Token"
+          },
+          "profile_id": {
+            "default": "sol-high",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "runtime_server_mode": {
+            "default": "dedicated",
+            "enum": [
+              "dedicated",
+              "outer_if_present",
+              "outer_required"
+            ],
+            "title": "Runtime Server Mode",
+            "type": "string"
+          },
+          "source_codex_session_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Codex Session Id"
+          },
+          "workerbee_profile": {
+            "const": "local-deploy",
+            "default": "local-deploy",
+            "title": "Workerbee Profile",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "title": "ManagedCallerRehydrateRequest",
+        "type": "object"
+      },
       "ManagedRuntimeStopFinalizeRequest": {
         "properties": {
           "metadata": {
@@ -5432,6 +5673,15 @@
             },
             "title": "Criteria",
             "type": "array"
+          },
+          "delivery_topology": {
+            "default": "operator_fork",
+            "enum": [
+              "operator_fork",
+              "direct_caller"
+            ],
+            "title": "Delivery Topology",
+            "type": "string"
           },
           "fork_track_id": {
             "anyOf": [
@@ -6055,6 +6305,15 @@
             },
             "title": "Criteria",
             "type": "array"
+          },
+          "delivery_topology": {
+            "default": "operator_fork",
+            "enum": [
+              "operator_fork",
+              "direct_caller"
+            ],
+            "title": "Delivery Topology",
+            "type": "string"
           },
           "fork_track_id": {
             "anyOf": [
@@ -6844,6 +7103,21 @@
               }
             ],
             "title": "Delivery Request Id"
+          },
+          "delivery_topology": {
+            "anyOf": [
+              {
+                "enum": [
+                  "operator_fork",
+                  "direct_caller"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivery Topology"
           },
           "fork_track_id": {
             "anyOf": [
@@ -25291,6 +25565,96 @@
         "summary": "Preview Managed Agent Launch"
       }
     },
+    "/v2/agents/rehydrate": {
+      "post": {
+        "operationId": "apply_managed_caller_rehydration_v2_agents_rehydrate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedCallerRehydrateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Apply Managed Caller Rehydration V2 Agents Rehydrate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Apply Managed Caller Rehydration"
+      }
+    },
+    "/v2/agents/rehydrate/preview": {
+      "post": {
+        "operationId": "preview_managed_caller_rehydration_v2_agents_rehydrate_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedCallerRehydrateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Preview Managed Caller Rehydration V2 Agents Rehydrate Preview Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Preview Managed Caller Rehydration"
+      }
+    },
     "/v2/agents/{agent_id}/codex-runtime": {
       "get": {
         "operationId": "get_agent_codex_runtime_v2_agents__agent_id__codex_runtime_get",
@@ -27395,6 +27759,31 @@
           }
         ],
         "summary": "Prepare Managed Runtime Stop"
+      }
+    },
+    "/v2/mcp/tool-manifest": {
+      "get": {
+        "operationId": "get_mcp_tool_manifest_v2_mcp_tool_manifest_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Mcp Tool Manifest V2 Mcp Tool Manifest Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Mcp Tool Manifest"
       }
     },
     "/v2/operator/authority/posture": {

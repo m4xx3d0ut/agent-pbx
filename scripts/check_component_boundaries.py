@@ -702,6 +702,10 @@ def write_fixtures() -> None:
         json.dumps(collect_openapi(), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    API_ROUTE_INVENTORY_PATH.write_text(
+        json.dumps(collect_api_route_inventory(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     TUI_COMPAT_PATH.write_text(
         json.dumps(collect_tui_compatibility(), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

@@ -10,6 +10,7 @@ from ..auth import get_store, require_token
 from ..codex_sessions import enrich_codex_session_metadata
 from ..lifecycle import LifecycleService
 from ..managed_runtime import ManagedRuntimeService
+from ..mcp_inventory import MCP_TOOL_MANIFEST_STORE_KEY
 from ..schemas import (
     AgentActiveRequest,
     AgentPaneAdoptionPreviewRequest,
@@ -450,6 +451,15 @@ def register_agent_lifecycle_routes(
                 request.agent_id,
             )
         return agent
+
+    @app.get(
+        "/v2/mcp/tool-manifest",
+        dependencies=[Depends(require_token)],
+    )
+    async def get_mcp_tool_manifest(
+        store: Any = Depends(get_store),
+    ) -> dict[str, object]:
+        return store.get_system_metadata_json(MCP_TOOL_MANIFEST_STORE_KEY)
 
     @app.get(
         "/v1/agents",

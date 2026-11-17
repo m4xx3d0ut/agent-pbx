@@ -16,6 +16,11 @@ from .schemas import (
     ReportCreateRequest,
     plan_options_to_jsonable,
 )
+from .mcp_inventory import (
+    MCP_TOOL_MANIFEST_METADATA_KEY,
+    MCP_TOOL_MANIFEST_STORE_KEY,
+    manifest_sha256,
+)
 from .project_spawn import PROJECT_SPAWN_TERMINAL_STATUSES, normalize_project_slug
 from .persistence.schema import initialize_schema
 from .persistence import (
@@ -387,6 +392,43 @@ class Store:
 
     def init(self) -> None:
         initialize_schema(self, schema_version=SCHEMA_VERSION)
+
+    @staticmethod
+    def _system_metadata_json(
+        conn: sqlite3.Connection,
+        key: str,
+    ) -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT value FROM metadata WHERE key = ?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return {}
+        try:
+            value = json.loads(row["value"])
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return dict(value) if isinstance(value, dict) else {}
+
+    def get_system_metadata_json(self, key: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            return self._system_metadata_json(conn, key)
+
+    def set_system_metadata_json(
+        self,
+        key: str,
+        value: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        payload = dict(value)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO metadata(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, json.dumps(payload, sort_keys=True, separators=(",", ":"))),
+            )
+        return payload
 
     @staticmethod
     def _schema_version(conn: sqlite3.Connection) -> int:
@@ -2237,10 +2279,75 @@ class Store:
             )
         return self.get_operator_fork(str(row["operator_fork_id"]))
 
+    def _add_mcp_inventory_summary(
+        self,
+        conn: sqlite3.Connection,
+        agent: dict[str, Any],
+        *,
+        manifest: Mapping[str, Any],
+    ) -> None:
+        current_digest = manifest_sha256(manifest)
+        mapping_row = conn.execute(
+            """
+            SELECT state, metadata_json
+            FROM tmux_runtime_mappings
+            WHERE entity_id = ?
+            """,
+            (str(agent["agent_id"]),),
+        ).fetchone()
+        mapping_metadata: dict[str, Any] = {}
+        if mapping_row is not None:
+            try:
+                decoded = json.loads(mapping_row["metadata_json"] or "{}")
+            except json.JSONDecodeError:
+                decoded = {}
+            if isinstance(decoded, dict):
+                mapping_metadata = decoded
+        agent_metadata = (
+            agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
+        )
+        session_digest = str(
+            agent_metadata.get(MCP_TOOL_MANIFEST_METADATA_KEY)
+            or mapping_metadata.get(MCP_TOOL_MANIFEST_METADATA_KEY)
+            or ""
+        ).strip().lower()
+        if manifest_sha256({"sha256": session_digest}) != session_digest:
+            session_digest = ""
+
+        if mapping_row is None:
+            state = "no_runtime"
+        elif not current_digest:
+            state = "unavailable"
+        elif not session_digest:
+            state = "unknown"
+        elif session_digest == current_digest:
+            state = "current"
+        else:
+            state = "stale"
+        refresh_required = state == "stale"
+        refresh_recommended = state in {"stale", "unknown"}
+        agent.update(
+            {
+                "mcp_inventory_state": state,
+                "mcp_current_tool_manifest_sha256": current_digest or None,
+                "mcp_session_tool_manifest_sha256": session_digest or None,
+                "mcp_current_tool_count": int(manifest.get("tool_count") or 0),
+                "mcp_runtime_mapping_state": (
+                    str(mapping_row["state"] or "") if mapping_row is not None else None
+                ),
+                "mcp_refresh_required": refresh_required,
+                "mcp_refresh_recommended": refresh_recommended,
+            }
+        )
+
     def list_agents(self, *, include_hidden: bool = False) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = self._agents.list_rows(conn, include_hidden=include_hidden)
             agents = [self._agent_from_row(row) for row in rows]
+            mcp_manifest = self._system_metadata_json(
+                conn,
+                MCP_TOOL_MANIFEST_STORE_KEY,
+            )
             fork_rows = self._operator_fork_rows_for_agents(
                 conn,
                 [str(agent["agent_id"]) for agent in agents],
@@ -2249,6 +2356,11 @@ class Store:
                 fork_row = fork_rows.get(str(agent["agent_id"]))
                 if fork_row is not None:
                     self._hydrate_operator_fork_agent(agent, fork_row)
+                self._add_mcp_inventory_summary(
+                    conn,
+                    agent,
+                    manifest=mcp_manifest,
+                )
                 self._add_latest_report_summary(conn, agent)
                 self._add_queue_summary(conn, agent)
                 self._add_campaign_summary(conn, agent)

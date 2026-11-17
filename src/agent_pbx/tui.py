@@ -98,6 +98,10 @@ from .git_broker import (
     validate_linked_git_commit_review,
 )
 from .managed_runtime import default_managed_project_roots
+from .mcp_inventory import (
+    MCP_TOOL_MANIFEST_ENV,
+    MCP_TOOL_MANIFEST_METADATA_KEY,
+)
 from .operator_authority import (
     operator_authority_launch_overrides,
     operator_authority_sandbox,
@@ -11874,7 +11878,12 @@ class AgentPBXTUI(App[None]):
 
     @staticmethod
     def format_operator_workflow_flow(agent: dict[str, Any]) -> str:
-        return str(agent.get("workflow_flow") or "").strip()
+        flow = str(agent.get("workflow_flow") or "").strip()
+        if bool(agent.get("mcp_refresh_required")):
+            return f"{flow} · MCP stale" if flow else "MCP stale"
+        if bool(agent.get("mcp_refresh_recommended")):
+            return f"{flow} · MCP ?" if flow else "MCP ?"
+        return flow
 
     def operator_workflow_explainability_lines(
         self,
@@ -11896,6 +11905,19 @@ class AgentPBXTUI(App[None]):
             "Workflow Secondary: "
             f"{str(agent.get('workflow_secondary_source') or '-').strip()} / "
             f"{str(agent.get('workflow_secondary_subject_id') or '-').strip()}",
+            "MCP Inventory: "
+            f"{str(agent.get('mcp_inventory_state') or 'unavailable').strip()} "
+            f"({int(agent.get('mcp_current_tool_count') or 0)} tools)",
+            "MCP Restart: "
+            + (
+                "required"
+                if bool(agent.get("mcp_refresh_required"))
+                else (
+                    "recommended"
+                    if bool(agent.get("mcp_refresh_recommended"))
+                    else "not required"
+                )
+            ),
         ]
 
     def infer_tmux_working_status(self, agent: dict[str, Any], status: str) -> bool:
@@ -17025,6 +17047,28 @@ class AgentPBXTUI(App[None]):
         metadata = agent.get("metadata") if isinstance(agent.get("metadata"), dict) else {}
         return dict(metadata)
 
+    def mcp_tool_manifest_digest(self, agent_id: str) -> str:
+        agent = self.agents.get(agent_id)
+        if isinstance(agent, dict):
+            digest = str(
+                agent.get("mcp_current_tool_manifest_sha256") or ""
+            ).strip()
+            if digest:
+                return digest
+        for candidate in self.agents.values():
+            if not isinstance(candidate, dict):
+                continue
+            digest = str(
+                candidate.get("mcp_current_tool_manifest_sha256") or ""
+            ).strip()
+            if digest:
+                return digest
+        return ""
+
+    def mcp_tool_manifest_metadata(self, agent_id: str) -> dict[str, str]:
+        digest = self.mcp_tool_manifest_digest(agent_id)
+        return {MCP_TOOL_MANIFEST_METADATA_KEY: digest} if digest else {}
+
     def codex_command_from_start_command(self, start_command: str) -> str:
         clean = start_command.strip()
         if not clean:
@@ -17323,6 +17367,7 @@ class AgentPBXTUI(App[None]):
                     "managed_by": "agent-pbx-tui",
                     "mapping_source": mapping_source,
                     "tmux_bin": tmux_bin,
+                    **self.mcp_tool_manifest_metadata(entity_id),
                 },
             },
             headers=auth_headers(self.token),
@@ -18067,6 +18112,7 @@ class AgentPBXTUI(App[None]):
                 {**metadata, "agent_type": CALLER_AGENT_TYPE},
                 profile=workerbee_profile,
             ),
+            **self.mcp_tool_manifest_metadata(agent_id),
         }
         if model_preset is not None:
             updated_metadata.update(model_preset.metadata())
@@ -18133,26 +18179,30 @@ class AgentPBXTUI(App[None]):
                 or mapping.get("codex_session_id")
                 or ""
             ).strip()
+            registration_payload = ui_runtime.in_place_restart_registration_payload(
+                mapping,
+                server_mode=normalize_runtime_server_mode(
+                    mapping.get("server_mode")
+                ).value,
+                socket_path=socket_path,
+                session_name=pane.session_name,
+                window_id=pane.window_id or pane.window_index,
+                window_name=pane.window_name,
+                pane_id=pane.pane_id,
+                pane_pid=pane_pid,
+                process_start_ticks=await asyncio.to_thread(
+                    runtime_process_start_ticks, pane_pid
+                ),
+                codex_session_id=session_id or None,
+                cwd=pane.cwd,
+                tmux_bin=runtime_kwargs["tmux_bin"],
+            )
+            registration_payload["metadata"].update(
+                self.mcp_tool_manifest_metadata(agent_id)
+            )
             response = await self.api_client().post(
                 f"/v2/tmux/runtimes/{quote(agent_id, safe='')}",
-                json=ui_runtime.in_place_restart_registration_payload(
-                    mapping,
-                    server_mode=normalize_runtime_server_mode(
-                        mapping.get("server_mode")
-                    ).value,
-                    socket_path=socket_path,
-                    session_name=pane.session_name,
-                    window_id=pane.window_id or pane.window_index,
-                    window_name=pane.window_name,
-                    pane_id=pane.pane_id,
-                    pane_pid=pane_pid,
-                    process_start_ticks=await asyncio.to_thread(
-                        runtime_process_start_ticks, pane_pid
-                    ),
-                    codex_session_id=session_id or None,
-                    cwd=pane.cwd,
-                    tmux_bin=runtime_kwargs["tmux_bin"],
-                ),
+                json=registration_payload,
                 headers=auth_headers(self.token),
             )
             response.raise_for_status()
@@ -21114,6 +21164,9 @@ class AgentPBXTUI(App[None]):
             "AGENT_PBX_WORKERBEE_BACKEND_GENERATION": "",
             "AGENT_PBX_WORKERBEE_WORKSPACE_BINDING_ID": "",
         }
+        manifest_digest = self.mcp_tool_manifest_digest(agent_id)
+        if manifest_digest:
+            env[MCP_TOOL_MANIFEST_ENV] = manifest_digest
         if operator_role == OPERATOR_ROLE_FORK:
             env["AGENT_PBX_OPERATOR_FORK_TRACK_ID"] = resolved_track_id
             env["AGENT_PBX_OPERATOR_FORK_PURPOSE"] = resolved_purpose
@@ -21421,6 +21474,9 @@ class AgentPBXTUI(App[None]):
             "AGENT_PBX_WORKERBEE_BACKEND_GENERATION": "",
             "AGENT_PBX_WORKERBEE_WORKSPACE_BINDING_ID": "",
         }
+        manifest_digest = self.mcp_tool_manifest_digest(agent_id)
+        if manifest_digest:
+            env[MCP_TOOL_MANIFEST_ENV] = manifest_digest
         if model_preset is not None:
             env["AGENT_PBX_CODEX_MODEL_PRESET"] = model_preset.key
             env["AGENT_PBX_CODEX_MODEL"] = model_preset.model
@@ -21843,6 +21899,7 @@ class AgentPBXTUI(App[None]):
             "source_cwd": request.get("source_cwd"),
             "spawn_mode": request.get("mode"),
             **self.workerbee_gateway_metadata(workerbee_gateway_binding),
+            **self.mcp_tool_manifest_metadata(agent_id),
         }
         metadata.update(
             self.workerbee_profile_metadata(
@@ -21900,6 +21957,7 @@ class AgentPBXTUI(App[None]):
             "token_env": AGENT_PBX_TOKEN_ENV,
             "tmux_session": session_name,
             "codex_command": codex_command,
+            **self.mcp_tool_manifest_metadata(agent_id),
         }
         if any(
             value is not None
@@ -23255,6 +23313,7 @@ class AgentPBXTUI(App[None]):
             "token_env": AGENT_PBX_TOKEN_ENV,
             "codex_command": codex_command,
             **launch_preset.metadata(),
+            **self.mcp_tool_manifest_metadata(fork_agent_id),
         }
         logical_agent = self.agents.get(logical_operator_id)
         logical_metadata = self.agent_metadata(logical_agent)

@@ -25,6 +25,12 @@ from .codex_launch import (
     managed_caller_bootstrap_prompt,
     managed_caller_codex_overrides,
 )
+from .mcp_inventory import (
+    MCP_TOOL_MANIFEST_ENV,
+    MCP_TOOL_MANIFEST_METADATA_KEY,
+    MCP_TOOL_MANIFEST_STORE_KEY,
+    manifest_sha256,
+)
 from .runtime_tmux import (
     exact_tmux_session_target,
     ensure_dedicated_runtime_server,
@@ -133,6 +139,11 @@ class ManagedRuntimeService:
     def public_roots(self) -> list[str]:
         return [str(path) for path in self.project_roots]
 
+    def _mcp_tool_manifest_sha256(self) -> str:
+        return manifest_sha256(
+            self.store.get_system_metadata_json(MCP_TOOL_MANIFEST_STORE_KEY)
+        )
+
     def discover_projects(self, *, root: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
         roots = self._selected_roots(root)
         discovered: dict[Path, ManagedProject] = {}
@@ -209,6 +220,7 @@ class ManagedRuntimeService:
             source_codex_session_id=source_codex_session_id,
             workerbee_profile=workerbee_profile,
         )
+        mcp_manifest_digest = self._mcp_tool_manifest_sha256()
         return {
             "agent_id": resolved_agent_id,
             "project": project_name,
@@ -234,6 +246,7 @@ class ManagedRuntimeService:
             "source_codex_session_id": str(source_codex_session_id or "").strip()
             or None,
             "workerbee_profile": workerbee_profile,
+            "mcp_tool_manifest_sha256": mcp_manifest_digest or None,
             "warnings": list(validation.warnings),
         }
 
@@ -357,6 +370,7 @@ class ManagedRuntimeService:
             "source_codex_session_id": historical_session_id or None,
             "workerbee_profile": workerbee_profile,
             "existing_mapping": existing_mapping,
+            "mcp_tool_manifest_sha256": self._mcp_tool_manifest_sha256() or None,
         }
         preview_token = hashlib.sha256(
             json.dumps(token_payload, sort_keys=True, separators=(",", ":")).encode()
@@ -403,6 +417,9 @@ class ManagedRuntimeService:
             ).hexdigest(),
             "source_codex_session_id": bootstrap_source,
             "workerbee_profile": workerbee_profile,
+            "mcp_tool_manifest_sha256": token_payload[
+                "mcp_tool_manifest_sha256"
+            ],
             "preview_token": preview_token,
         }
 
@@ -521,6 +538,10 @@ class ManagedRuntimeService:
             )
         if token:
             env["AGENT_PBX_TOKEN"] = token
+        if preview.get("mcp_tool_manifest_sha256"):
+            env[MCP_TOOL_MANIFEST_ENV] = str(
+                preview["mcp_tool_manifest_sha256"]
+            )
         env = managed_tmux_launch_environment(
             env,
             identity.tmux_bin or self.tmux_bin,
@@ -625,6 +646,10 @@ class ManagedRuntimeService:
                 ),
                 WORKERBEE_PROFILE_INTENT_METADATA_KEY: profile_intent.public_dict(),
             }
+            if preview.get("mcp_tool_manifest_sha256"):
+                metadata[MCP_TOOL_MANIFEST_METADATA_KEY] = str(
+                    preview["mcp_tool_manifest_sha256"]
+                )
             runtime_mapping = {
                     "server_mode": identity.effective_mode.value,
                     "server_id": identity.server_id,
@@ -657,6 +682,10 @@ class ManagedRuntimeService:
                         ),
                     },
                 }
+            if preview.get("mcp_tool_manifest_sha256"):
+                runtime_mapping["metadata"][MCP_TOOL_MANIFEST_METADATA_KEY] = str(
+                    preview["mcp_tool_manifest_sha256"]
+                )
             if _rehydrate_existing:
                 metadata.update(
                     {

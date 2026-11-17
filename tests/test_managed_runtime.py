@@ -12,6 +12,10 @@ from agent_pbx.api import create_app
 from agent_pbx.codex_cli import CodexModelOption
 from agent_pbx.config import ServerConfig
 from agent_pbx.managed_runtime import ManagedRuntimeService
+from agent_pbx.mcp_inventory import (
+    MCP_TOOL_MANIFEST_METADATA_KEY,
+    MCP_TOOL_MANIFEST_STORE_KEY,
+)
 from agent_pbx.runtime_tmux import (
     MAX_GENERATED_UNIX_SOCKET_PATH_BYTES,
     RuntimeTmuxPane,
@@ -60,6 +64,11 @@ def test_project_discovery_and_launch_preview_are_git_scoped(tmp_path: Path) -> 
     (root / "plain").mkdir()
     store = Store(tmp_path / "pbx.sqlite")
     store.init()
+    manifest_digest = "c" * 64
+    store.set_system_metadata_json(
+        MCP_TOOL_MANIFEST_STORE_KEY,
+        {"schema_version": 1, "tool_count": 71, "sha256": manifest_digest},
+    )
     runtime = service(store, root)
 
     projects = runtime.discover_projects()
@@ -69,6 +78,7 @@ def test_project_discovery_and_launch_preview_are_git_scoped(tmp_path: Path) -> 
     assert preview["model"] == "gpt-5.6-sol"
     assert preview["runtime_server"]["effective_mode"] == "dedicated"
     assert preview["command"][0] == "/usr/bin/codex-test"
+    assert preview["mcp_tool_manifest_sha256"] == manifest_digest
 
     with pytest.raises(ValueError, match="outside approved roots"):
         runtime.preview_launch(project_path=str(init_repo(tmp_path / "other")))
@@ -102,6 +112,11 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
     repo = init_repo(root / "demo")
     store = Store(tmp_path / "pbx.sqlite")
     store.init()
+    manifest_digest = "c" * 64
+    store.set_system_metadata_json(
+        MCP_TOOL_MANIFEST_STORE_KEY,
+        {"schema_version": 1, "tool_count": 71, "sha256": manifest_digest},
+    )
     runtime = service(store, root)
     commands: list[list[str]] = []
     real_run = subprocess.run
@@ -169,6 +184,10 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
     assert any("AGENT_PBX_CODEX_REASONING_EFFORT=high" in item for item in commands[0])
     assert any("AGENT_PBX_CODEX_REASONING_SUMMARY=detailed" in item for item in commands[0])
     assert any("AGENT_PBX_CODEX_VERBOSITY=high" in item for item in commands[0])
+    assert any(
+        f"AGENT_PBX_MCP_TOOL_MANIFEST_SHA256={manifest_digest}" in item
+        for item in commands[0]
+    )
     assert any("PATH=/private/bin:/usr/bin" in item for item in commands[0])
     assert commands[0][-1].startswith("exec ")
     assert "check_for_update_on_startup=false" in commands[0][-1]
@@ -182,6 +201,10 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
     assert metadata["source_codex_session_id"] == "source-session-1"
     assert metadata["workerbee_mcp_profile"] == "local-deploy"
     assert metadata["workerbee_profile_intent"]["profile"] == "local-deploy"
+    assert metadata[MCP_TOOL_MANIFEST_METADATA_KEY] == manifest_digest
+    mapping = store.get_tmux_runtime_mapping("codex-demo")
+    assert mapping is not None
+    assert mapping["metadata"][MCP_TOOL_MANIFEST_METADATA_KEY] == manifest_digest
 
     repeated = runtime.launch(
         project_path=str(repo),
@@ -554,6 +577,11 @@ def test_managed_runtime_api_discovers_projects_and_persists_migration(
     )
     client = TestClient(app)
     headers = {"Authorization": "Bearer secret"}
+
+    manifest = client.get("/v2/mcp/tool-manifest", headers=headers)
+    assert manifest.status_code == 200
+    assert manifest.json()["tool_count"] >= 1
+    assert len(manifest.json()["sha256"]) == 64
 
     discovered = client.get("/v2/projects/discover", headers=headers)
     assert discovered.status_code == 200

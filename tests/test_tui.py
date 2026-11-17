@@ -5657,6 +5657,9 @@ async def test_tui_selected_operator_detail_exposes_workflow_reason_and_source()
                 "workflow_precedence_reason": "durable_completion_receipt",
                 "workflow_secondary_source": "campaign",
                 "workflow_secondary_subject_id": "campaign-1",
+                "mcp_inventory_state": "stale",
+                "mcp_current_tool_count": 71,
+                "mcp_refresh_required": True,
             }
         }
         await app.load_latest_report("operator-0")
@@ -5668,6 +5671,8 @@ async def test_tui_selected_operator_detail_exposes_workflow_reason_and_source()
     assert "Workflow Subject ID: completion-1" in detail
     assert "Workflow Precedence: durable_completion_receipt" in detail
     assert "Workflow Secondary: campaign / campaign-1" in detail
+    assert "MCP Inventory: stale (71 tools)" in detail
+    assert "MCP Restart: required" in detail
 
 
 def test_tui_operator_columns_keep_state_visible_before_identity_on_all_layouts() -> None:
@@ -28199,6 +28204,42 @@ def test_tui_workerbee_gateway_binding_replaces_direct_transport_and_sets_env() 
     assert env["AGENT_PBX_WORKERBEE_BACKEND"] == "platform_debug"
     assert env["AGENT_PBX_WORKERBEE_BACKEND_GENERATION"] == "8"
     assert env["AGENT_PBX_WORKERBEE_WORKSPACE_BINDING_ID"] == "wb-binding"
+
+
+def test_tui_launch_surfaces_record_authoritative_mcp_manifest() -> None:
+    digest = "d" * 64
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "operator-6": {
+            "agent_id": "operator-6",
+            "agent_type": "operator",
+            "mcp_current_tool_manifest_sha256": digest,
+            "metadata": {},
+        }
+    }
+
+    operator_env = app.operator_launch_env(
+        agent_id="operator-6",
+        cwd="/tmp/project",
+        mcp_url="http://127.0.0.1:8765/mcp",
+    )
+    caller_env = app.caller_runtime_env(
+        agent_id="new-caller",
+        project="demo",
+        cwd="/tmp/project",
+        mcp_url="http://127.0.0.1:8765/mcp",
+    )
+    operator_metadata = app.operator_root_metadata(
+        "operator-6",
+        cwd="/tmp/project",
+        codex_command="codex",
+        mcp_url="http://127.0.0.1:8765/mcp",
+        session_name="operators",
+    )
+
+    assert operator_env["AGENT_PBX_MCP_TOOL_MANIFEST_SHA256"] == digest
+    assert caller_env["AGENT_PBX_MCP_TOOL_MANIFEST_SHA256"] == digest
+    assert operator_metadata["mcp_tool_manifest_sha256"] == digest
 
 
 def test_tui_trusted_workerbee_profile_is_independent_from_scoped_edit_authority() -> None:

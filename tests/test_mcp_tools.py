@@ -10,6 +10,7 @@ from agent_pbx import mcp_tools
 from agent_pbx.config import ServerConfig
 from agent_pbx.host_process_evidence import HostProcessAttestor
 from agent_pbx.mcp_tools import BearerAuthASGIMiddleware, build_mcp_server
+from agent_pbx.mcp_inventory import MCP_TOOL_MANIFEST_STORE_KEY
 from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.store import Store
 
@@ -49,6 +50,26 @@ def tool_json(result: object) -> object:
             return structured
         return json.loads(content[0].text)
     return json.loads(result[0].text)  # type: ignore[index, attr-defined]
+
+
+def test_mcp_build_persists_deterministic_tool_manifest(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+
+    first = build_mcp_server(store)
+    first_manifest = store.get_system_metadata_json(MCP_TOOL_MANIFEST_STORE_KEY)
+    second = build_mcp_server(store)
+    second_manifest = store.get_system_metadata_json(MCP_TOOL_MANIFEST_STORE_KEY)
+
+    assert first_manifest == second_manifest
+    assert first_manifest["sha256"] == first.agent_pbx_tool_manifest["sha256"]
+    assert second_manifest["sha256"] == second.agent_pbx_tool_manifest["sha256"]
+    assert first_manifest["tool_count"] == len(first_manifest["tools"])
+    assert {tool["name"] for tool in first_manifest["tools"]} >= {
+        "pbx_agent_runbook",
+        "pbx_register_agent",
+        "pbx_report_turn",
+    }
 
 
 @contextmanager
