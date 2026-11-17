@@ -14,6 +14,12 @@
 
 - Disable Codex startup update checks explicitly for managed caller, root
   Operator, edit-fork, review-fork, restart, and resume launch policies.
+- Resolve new root Operators through a daemon-owned WorkerBee profile default
+  and independent access ceiling. The committed default remains
+  `local-deploy`; trusted-workstation overlays may select `trusted-workbench`
+  only under an equal or broader ceiling. Caller Agents remain `local-deploy`,
+  edit forks inherit the root Operator's effective profile, and review forks
+  remain read-only.
 
 ### Fixed
 
