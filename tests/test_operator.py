@@ -301,6 +301,120 @@ def test_terminal_fork_report_projects_assignment_and_campaign(tmp_path: Path) -
     assert closed["completed_at"] == report["created_at"]
 
 
+def test_terminal_campaign_history_does_not_veto_live_successor_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+    fork_agent_id = "operator-0-fork-caller-1"
+    fork = service.ensure_fork(
+        operator_agent_id="operator-0",
+        source_caller_agent_id="caller-1",
+        fork_agent_id=fork_agent_id,
+        fork_codex_session_id="session-fork-1",
+        source_cwd=str(tmp_path / "caller-1"),
+        work_root=str(tmp_path / "caller-1"),
+        status="running",
+        metadata={"pbx_mode": "report"},
+    )
+    prepare_exact_idle_delivery_target(
+        store,
+        monkeypatch,
+        service=service,
+        agent_id=fork_agent_id,
+        workspace=tmp_path / "caller-1",
+    )
+    service.idle_target_delivery.runtime_snapshot = None
+
+    historical = store.create_operator_campaign(
+        operator_agent_id="operator-0",
+        title="Operator-0 terminal fixture",
+        objective="Preserve immutable terminal history.",
+        criteria=["terminal report remains immutable"],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Finish."}],
+    )
+    historical_assignment = historical["assignments"][0]
+    store.update_operator_assignment(
+        historical_assignment["assignment_id"],
+        state="sent",
+        operator_fork_id=fork["operator_fork_id"],
+    )
+    terminal_report = store.create_report(
+        fork_agent_id,
+        ReportCreateRequest(
+            project="agent-pbx-operator",
+            status="done",
+            summary="Historical assignment complete",
+            detail="This report closes only its bound campaign.",
+            metadata={
+                "campaign_id": historical["campaign_id"],
+                "assignment_id": historical_assignment["assignment_id"],
+                "operator_0_terminal_report_id": (
+                    "0f2e23a0-ba17-438b-962c-e16385f9bd5c"
+                ),
+            },
+        ),
+    )
+    readiness_report = store.create_report(
+        fork_agent_id,
+        ReportCreateRequest(
+            project="agent-pbx-operator",
+            status="needs_input",
+            summary="Runtime is at the input prompt",
+            detail="Readiness evidence is independent from terminal history.",
+            metadata={
+                "readiness_report_id": "c6c5cdb8-8755-4e22-9ac4-09d1e9c84e0f",
+            },
+        ),
+    )
+    successor = store.create_operator_campaign(
+        operator_agent_id="operator-0",
+        title="Runtime-readiness successor",
+        objective="Deliver to the exact current input-ready runtime.",
+        criteria=["exact delivery"],
+        assignments=[{"target_agent_id": "caller-1", "prompt": "Continue."}],
+    )
+    successor_assignment = successor["assignments"][0]
+    store.update_operator_assignment(
+        successor_assignment["assignment_id"],
+        state="waiting",
+        operator_fork_id=fork["operator_fork_id"],
+    )
+
+    command = service.send_followup(
+        operator_agent_id="operator-0",
+        campaign_id=successor["campaign_id"],
+        target_agent_id="caller-1",
+        assignment_id=successor_assignment["assignment_id"],
+        operator_fork_id=fork["operator_fork_id"],
+        message="Continue through the successor assignment.",
+        delivery="tmux",
+        delivery_request_id="operator-0-successor-delivery",
+    )
+
+    assert command["status"] == "sent"
+    assert command["result"]["reason_code"] == "input_prompt_delivered"
+    assert command["result"]["readiness_provenance"]["runtime"] == {
+        "source": "pbx_report_projection",
+        "state": "needs_input",
+        "observed_at": pytest.approx(float(readiness_report["created_at"])),
+        "projection_only": True,
+        "reason_code": "report_projection_not_runtime_authority",
+    }
+    preserved = store.get_operator_campaign(historical["campaign_id"])
+    preserved_assignment = store.get_operator_campaign_assignment(
+        historical_assignment["assignment_id"]
+    )
+    assert preserved is not None
+    assert preserved["status"] == "complete"
+    assert preserved_assignment is not None
+    assert preserved_assignment["state"] == "complete"
+    assert preserved_assignment["last_report_id"] == terminal_report["report_id"]
+
+
 def test_terminal_report_projection_rejects_reporter_and_preserves_terminal_state(
     tmp_path: Path,
 ) -> None:

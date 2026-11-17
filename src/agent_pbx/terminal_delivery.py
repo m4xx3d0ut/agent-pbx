@@ -81,6 +81,26 @@ class TerminalReadiness:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeReadinessProvenance:
+    """Bounded evidence explaining the runtime gate for one delivery decision."""
+
+    source: str
+    state: str
+    observed_at: float | None
+    projection_only: bool
+    reason_code: str
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "state": self.state,
+            "observed_at": self.observed_at,
+            "projection_only": self.projection_only,
+            "reason_code": self.reason_code,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class IdleTargetDeliveryRequest:
     request_id: str
     entity_id: str
@@ -102,6 +122,7 @@ class ManagedTerminalIdentity:
     pane_id: str
     pane_pid: int
     process_start_ticks: int
+    runtime_generation: str
     workspace_path: str
     workspace_set_digest: str
     authority_profile: str
@@ -118,6 +139,7 @@ class ManagedTerminalIdentity:
             "pane_id": self.pane_id,
             "pane_pid": self.pane_pid,
             "process_start_ticks": self.process_start_ticks,
+            "runtime_generation": self.runtime_generation,
             "workspace_path": self.workspace_path,
             "workspace_set_digest": self.workspace_set_digest,
             "authority_profile": self.authority_profile,
@@ -144,6 +166,7 @@ class IdleTargetDeliveryResult:
     target_identity: Mapping[str, Any] | None
     replayed: bool
     writer_client_id: str | None
+    readiness_provenance: Mapping[str, Any] | None = None
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -158,6 +181,7 @@ class IdleTargetDeliveryResult:
             "target_identity": dict(self.target_identity or {}),
             "replayed": self.replayed,
             "writer_client_id": self.writer_client_id,
+            "readiness_provenance": dict(self.readiness_provenance or {}),
         }
 
 
@@ -173,10 +197,13 @@ class _ClassifiedDeliveryError(RuntimeError):
         outcome: IdleTargetDeliveryOutcome,
         reason_code: str,
         reason: str,
+        *,
+        readiness_provenance: Mapping[str, Any] | None = None,
     ) -> None:
         self.outcome = outcome
         self.reason_code = reason_code
         self.reason = reason
+        self.readiness_provenance = dict(readiness_provenance or {})
         super().__init__(reason)
 
 
@@ -376,12 +403,20 @@ class IdleTargetDeliveryService:
         command_id = str(command["command_id"])
         writer_client_id = self._writer_client_id(request.request_id)
         identity: ManagedTerminalIdentity | None = None
+        readiness_provenance: dict[str, Any] = {}
         lease_acquired = False
         send_attempted = False
         try:
             identity = self._resolve_identity(agent)
-            self._validate_runtime_snapshot(identity)
-            self._validate_terminal(identity)
+            runtime_provenance = self._validate_runtime_snapshot(identity)
+            readiness_provenance = {
+                "runtime": runtime_provenance.public_dict(),
+            }
+            terminal_readiness = self._validate_terminal(identity)
+            readiness_provenance = self._readiness_provenance(
+                runtime_provenance,
+                terminal_readiness,
+            )
             try:
                 leased = self.store.acquire_tmux_writer_lease(
                     identity.entity_id,
@@ -418,8 +453,15 @@ class IdleTargetDeliveryService:
                     "mapping_changed_after_writer_lease",
                     "managed runtime identity changed after writer lease acquisition",
                 )
-            self._validate_runtime_snapshot(refreshed)
-            self._validate_terminal(refreshed)
+            runtime_provenance = self._validate_runtime_snapshot(refreshed)
+            readiness_provenance = {
+                "runtime": runtime_provenance.public_dict(),
+            }
+            terminal_readiness = self._validate_terminal(refreshed)
+            readiness_provenance = self._readiness_provenance(
+                runtime_provenance,
+                terminal_readiness,
+            )
             send_attempted = True
             tmux_support.send_text(
                 refreshed.pane_id,
@@ -437,8 +479,11 @@ class IdleTargetDeliveryService:
                 reason="message was delivered to the exact idle managed terminal",
                 identity=refreshed,
                 writer_client_id=writer_client_id,
+                readiness_provenance=readiness_provenance,
             )
         except _ClassifiedDeliveryError as exc:
+            if exc.readiness_provenance:
+                readiness_provenance.update(exc.readiness_provenance)
             result = self._result(
                 request=request,
                 command_id=command_id,
@@ -447,6 +492,7 @@ class IdleTargetDeliveryService:
                 reason=exc.reason,
                 identity=identity,
                 writer_client_id=writer_client_id if lease_acquired else None,
+                readiness_provenance=readiness_provenance,
             )
         except Exception as exc:  # noqa: BLE001 - partial tmux delivery is ambiguous.
             result = self._result(
@@ -465,6 +511,7 @@ class IdleTargetDeliveryService:
                 reason=str(exc) or "managed terminal delivery failed",
                 identity=identity,
                 writer_client_id=writer_client_id if lease_acquired else None,
+                readiness_provenance=readiness_provenance,
             )
         release_error: Exception | None = None
         if lease_acquired:
@@ -484,6 +531,7 @@ class IdleTargetDeliveryService:
                 reason=f"writer lease cleanup failed: {release_error}",
                 identity=identity,
                 writer_client_id=writer_client_id,
+                readiness_provenance=readiness_provenance,
             )
         terminal_status = (
             "sent"
@@ -507,6 +555,7 @@ class IdleTargetDeliveryService:
             target_identity=result.target_identity,
             replayed=False,
             writer_client_id=result.writer_client_id,
+            readiness_provenance=result.readiness_provenance,
         )
         self._append_audit(final_result)
         return final_result
@@ -597,6 +646,53 @@ class IdleTargetDeliveryService:
                 "process_identity_incomplete",
                 "managed runtime process identity is incomplete",
             )
+        mapping_metadata = (
+            mapping.get("metadata")
+            if isinstance(mapping.get("metadata"), Mapping)
+            else {}
+        )
+        generation_declared = (
+            "runtime_generation" in mapping_metadata
+            or "generation" in mapping_metadata
+        )
+        raw_generation = mapping_metadata.get(
+            "runtime_generation",
+            mapping_metadata.get("generation"),
+        )
+        if generation_declared and (
+            isinstance(raw_generation, bool)
+            or not isinstance(raw_generation, (str, int))
+        ):
+            raise _ClassifiedDeliveryError(
+                IdleTargetDeliveryOutcome.STALE_MAPPING,
+                "runtime_generation_invalid",
+                "managed runtime generation evidence is invalid",
+            )
+        runtime_generation = str(raw_generation or "").strip()
+        if generation_declared and not runtime_generation:
+            raise _ClassifiedDeliveryError(
+                IdleTargetDeliveryOutcome.STALE_MAPPING,
+                "runtime_generation_invalid",
+                "managed runtime generation evidence is invalid",
+            )
+        if not generation_declared:
+            try:
+                created_at = float(mapping.get("created_at") or 0)
+            except (TypeError, ValueError):
+                created_at = 0
+            if created_at <= 0:
+                raise _ClassifiedDeliveryError(
+                    IdleTargetDeliveryOutcome.STALE_MAPPING,
+                    "runtime_generation_unavailable",
+                    "managed runtime generation evidence is unavailable",
+                )
+            runtime_generation = f"mapping-created:{created_at:.6f}"
+        if len(runtime_generation) > 128:
+            raise _ClassifiedDeliveryError(
+                IdleTargetDeliveryOutcome.STALE_MAPPING,
+                "runtime_generation_invalid",
+                "managed runtime generation evidence is invalid",
+            )
         return ManagedTerminalIdentity(
             entity_id=entity_id,
             codex_session_id=codex_session_id,
@@ -608,22 +704,26 @@ class IdleTargetDeliveryService:
             pane_id=required["pane_id"],
             pane_pid=pane_pid,
             process_start_ticks=start_ticks,
+            runtime_generation=runtime_generation,
             workspace_path=workspace_path,
             workspace_set_digest=workspace_digest,
             authority_profile=authority_profile,
         )
 
-    def _validate_runtime_snapshot(self, identity: ManagedTerminalIdentity) -> None:
+    def _validate_runtime_snapshot(
+        self,
+        identity: ManagedTerminalIdentity,
+    ) -> RuntimeReadinessProvenance:
         if self.runtime_snapshot is None:
             agent = self.store.get_agent(identity.entity_id) or {}
             state = str(agent.get("status") or "").strip().lower()
-            if state not in {"ready", "registered", "waiting", "done", "complete"}:
-                raise _ClassifiedDeliveryError(
-                    IdleTargetDeliveryOutcome.TARGET_NOT_READY,
-                    "runtime_state_not_ready",
-                    "target has no ready Codex runtime evidence",
-                )
-            return
+            return RuntimeReadinessProvenance(
+                source="pbx_report_projection",
+                state=state or "unknown",
+                observed_at=self._optional_float(agent.get("last_seen_at")),
+                projection_only=True,
+                reason_code="report_projection_not_runtime_authority",
+            )
         try:
             snapshot = self.runtime_snapshot(identity.entity_id)
         except Exception as exc:
@@ -645,14 +745,33 @@ class IdleTargetDeliveryService:
                 "Codex runtime evidence belongs to another session",
             )
         state = str(snapshot.get("state") or "").strip().lower()
-        if state not in RUNTIME_READY_STATES:
+        evidence = snapshot.get("evidence")
+        evidence_mapping = evidence if isinstance(evidence, Mapping) else {}
+        source = str(evidence_mapping.get("source") or "runtime_snapshot_legacy").strip()
+        projection_only = source == "pbx_report"
+        provenance = RuntimeReadinessProvenance(
+            source=source,
+            state=state or "unknown",
+            observed_at=self._optional_float(
+                evidence_mapping.get("observed_at", snapshot.get("updated_at"))
+            ),
+            projection_only=projection_only,
+            reason_code=(
+                "report_projection_not_runtime_authority"
+                if projection_only
+                else "runtime_snapshot_current"
+            ),
+        )
+        if not projection_only and state not in RUNTIME_READY_STATES:
             raise _ClassifiedDeliveryError(
                 IdleTargetDeliveryOutcome.TARGET_NOT_READY,
                 "runtime_state_not_ready",
                 f"Codex runtime state is {state or 'unknown'}, not input-ready",
+                readiness_provenance={"runtime": provenance.public_dict()},
             )
+        return provenance
 
-    def _validate_terminal(self, identity: ManagedTerminalIdentity) -> None:
+    def _validate_terminal(self, identity: ManagedTerminalIdentity) -> TerminalReadiness:
         tmux_bin = runtime_mapping_tmux_binary(
             self.store.get_tmux_runtime_mapping(identity.entity_id) or {}
         )
@@ -730,7 +849,41 @@ class IdleTargetDeliveryService:
                 readiness.outcome,
                 readiness.reason_code,
                 "Codex terminal is not at an idle input prompt",
+                readiness_provenance={
+                    "terminal": self._terminal_provenance(readiness)
+                },
             )
+        return readiness
+
+    @staticmethod
+    def _terminal_provenance(readiness: TerminalReadiness) -> dict[str, Any]:
+        return {
+            "source": "managed_tmux_capture",
+            "ready": readiness.ready,
+            "reason_code": readiness.reason_code,
+            "overlay": readiness.overlay,
+        }
+
+    @classmethod
+    def _readiness_provenance(
+        cls,
+        runtime: RuntimeReadinessProvenance,
+        terminal: TerminalReadiness,
+    ) -> dict[str, Any]:
+        return {
+            "runtime": runtime.public_dict(),
+            "terminal": cls._terminal_provenance(terminal),
+            "decision_source": "exact_managed_terminal",
+        }
+
+    @staticmethod
+    def _optional_float(value: object) -> float | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def _record_without_agent(
         self,
@@ -835,6 +988,11 @@ class IdleTargetDeliveryService:
                 ),
                 replayed=True,
                 writer_client_id=str(raw.get("writer_client_id") or "") or None,
+                readiness_provenance=(
+                    dict(raw["readiness_provenance"])
+                    if isinstance(raw.get("readiness_provenance"), Mapping)
+                    else None
+                ),
             )
         if str(command.get("status") or "") == "queued":
             return IdleTargetDeliveryResult(
@@ -900,6 +1058,7 @@ class IdleTargetDeliveryService:
         reason: str,
         identity: ManagedTerminalIdentity | None,
         writer_client_id: str | None,
+        readiness_provenance: Mapping[str, Any] | None = None,
     ) -> IdleTargetDeliveryResult:
         return IdleTargetDeliveryResult(
             request_id=request.request_id,
@@ -912,6 +1071,9 @@ class IdleTargetDeliveryService:
             target_identity=identity.public_dict() if identity else None,
             replayed=False,
             writer_client_id=writer_client_id,
+            readiness_provenance=(
+                dict(readiness_provenance or {}) or None
+            ),
         )
 
     def _append_audit(

@@ -12,7 +12,11 @@ from agent_pbx import terminal_delivery
 from agent_pbx.api import run_operator_call
 from agent_pbx.mcp_tools import build_mcp_server
 from agent_pbx.operator import OperatorService
-from agent_pbx.schemas import AgentRegisterRequest, CommandCreateRequest
+from agent_pbx.schemas import (
+    AgentRegisterRequest,
+    CommandCreateRequest,
+    ReportCreateRequest,
+)
 from agent_pbx.store import Store
 from agent_pbx.terminal_delivery import (
     IdleTargetDeliveryError,
@@ -62,6 +66,7 @@ def _register_mapping(
     pane_id: str = "%1",
     pane_pid: int = 123,
     process_start_ticks: int = 456,
+    runtime_generation: str | int = "mapping-1",
 ) -> None:
     store.upsert_tmux_runtime_mapping(
         entity_id="operator-6-fork-caller-1",
@@ -77,6 +82,7 @@ def _register_mapping(
         codex_session_id=codex_session_id,
         cwd=workspace,
         state="ready",
+        metadata={"runtime_generation": runtime_generation},
     )
 
 
@@ -195,6 +201,7 @@ def test_idle_delivery_binds_exact_target_and_audits_without_prompt(
         "pane_id": "%1",
         "pane_pid": 123,
         "process_start_ticks": 456,
+        "runtime_generation": "mapping-1",
         "workspace_path": "/srv/work/project",
         "workspace_set_digest": "a" * 64,
         "authority_profile": "scoped-edit",
@@ -216,6 +223,122 @@ def test_idle_delivery_binds_exact_target_and_audits_without_prompt(
     serialized = json.dumps(events)
     assert "Continue the exact task." not in serialized
     assert "Recent output" not in serialized
+    assert result.readiness_provenance == {
+        "runtime": {
+            "source": "runtime_snapshot_legacy",
+            "state": "ready",
+            "observed_at": None,
+            "projection_only": False,
+            "reason_code": "runtime_snapshot_current",
+        },
+        "terminal": {
+            "source": "managed_tmux_capture",
+            "ready": True,
+            "reason_code": "input_prompt_ready",
+            "overlay": None,
+        },
+        "decision_source": "exact_managed_terminal",
+    }
+
+
+def test_terminal_report_projection_does_not_veto_exact_input_ready_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reproduce the Operator-0 terminal-report/readiness delivery sequence."""
+
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    _register_target(store)
+    _register_mapping(store)
+    _patch_ready_terminal(monkeypatch)
+    report = store.create_report(
+        "operator-6-fork-caller-1",
+        ReportCreateRequest(
+            project="agent-pbx-operator",
+            status="needs_input",
+            summary="Terminal campaign history is immutable",
+            detail="The managed Codex runtime remains at an exact idle input prompt.",
+            metadata={
+                "operator_0_terminal_report_id": (
+                    "0f2e23a0-ba17-438b-962c-e16385f9bd5c"
+                ),
+                "rejected_delivery_id": "006f6bbb-bbf7-4e40-9fc2-cdd2bc96bfe6",
+                "readiness_report_id": "c6c5cdb8-8755-4e22-9ac4-09d1e9c84e0f",
+                "successful_delivery_id": "7508d471-1c16-41e4-b1ce-89ced3874d32",
+            },
+        ),
+    )
+
+    result = IdleTargetDeliveryService(store).deliver(
+        _request(request_id="operator-0-runtime-readiness-fixture")
+    )
+
+    assert report["status"] == "needs_input"
+    agent = store.get_agent("operator-6-fork-caller-1")
+    assert agent is not None
+    assert agent["status"] == "needs_input"
+    assert result.outcome == IdleTargetDeliveryOutcome.DELIVERED
+    assert result.reason_code == "input_prompt_delivered"
+    assert result.readiness_provenance is not None
+    runtime = result.readiness_provenance["runtime"]
+    assert runtime["source"] == "pbx_report_projection"
+    assert runtime["state"] == "needs_input"
+    assert runtime["observed_at"] == pytest.approx(float(report["created_at"]))
+    assert runtime["projection_only"] is True
+    assert runtime["reason_code"] == "report_projection_not_runtime_authority"
+    assert result.readiness_provenance["terminal"]["ready"] is True
+
+
+def test_pbx_report_runtime_snapshot_is_projection_only_but_live_interrupt_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    _register_target(store)
+    _register_mapping(store)
+    _patch_ready_terminal(monkeypatch)
+
+    report_projection = IdleTargetDeliveryService(
+        store,
+        runtime_snapshot=lambda _agent_id: {
+            "session_id": "session-1",
+            "state": "interrupted",
+            "updated_at": 100.0,
+            "evidence": {
+                "source": "pbx_report",
+                "observed_at": 100.0,
+            },
+        },
+    ).deliver(_request(request_id="report-projection-interrupted"))
+    live_interrupt = IdleTargetDeliveryService(
+        store,
+        runtime_snapshot=lambda _agent_id: {
+            "session_id": "session-1",
+            "state": "interrupted",
+            "updated_at": 101.0,
+            "evidence": {
+                "source": "app_server",
+                "observed_at": 101.0,
+            },
+        },
+    ).deliver(_request(request_id="live-runtime-interrupted"))
+
+    assert report_projection.outcome == IdleTargetDeliveryOutcome.DELIVERED
+    assert report_projection.readiness_provenance is not None
+    assert report_projection.readiness_provenance["runtime"]["projection_only"] is True
+    assert live_interrupt.outcome == IdleTargetDeliveryOutcome.TARGET_NOT_READY
+    assert live_interrupt.reason_code == "runtime_state_not_ready"
+    assert live_interrupt.readiness_provenance == {
+        "runtime": {
+            "source": "app_server",
+            "state": "interrupted",
+            "observed_at": 101.0,
+            "projection_only": False,
+            "reason_code": "runtime_snapshot_current",
+        }
+    }
 
 
 def test_idle_delivery_is_idempotent_across_service_restart(
@@ -638,6 +761,79 @@ def test_idle_delivery_rejects_changed_mapping_after_writer_lease(
 
     assert result.outcome == IdleTargetDeliveryOutcome.STALE_MAPPING
     assert result.reason_code == "mapping_changed_after_writer_lease"
+
+
+def test_idle_delivery_rejects_runtime_generation_drift_after_writer_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    _register_target(store)
+    _register_mapping(store, runtime_generation="mapping-1")
+    _patch_ready_terminal(monkeypatch)
+    original_acquire = store.acquire_tmux_writer_lease
+
+    def acquire_and_change_generation(
+        entity_id: str,
+        *,
+        client_id: str,
+        ttl_seconds: float,
+    ) -> dict[str, Any]:
+        leased = original_acquire(
+            entity_id,
+            client_id=client_id,
+            ttl_seconds=ttl_seconds,
+        )
+        _register_mapping(store, runtime_generation="mapping-2")
+        return leased
+
+    monkeypatch.setattr(
+        store,
+        "acquire_tmux_writer_lease",
+        acquire_and_change_generation,
+    )
+
+    result = _service(store).deliver(_request(request_id="generation-drift"))
+
+    assert result.outcome == IdleTargetDeliveryOutcome.STALE_MAPPING
+    assert result.reason_code == "mapping_changed_after_writer_lease"
+
+
+def test_idle_delivery_rejects_declared_malformed_runtime_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    _register_target(store)
+    _register_mapping(store)
+    mapping = store.get_tmux_runtime_mapping("operator-6-fork-caller-1")
+    assert mapping is not None
+    mapping_metadata = dict(mapping.get("metadata") or {})
+    mapping_metadata["runtime_generation"] = True
+    store.upsert_tmux_runtime_mapping(
+        entity_id="operator-6-fork-caller-1",
+        server_mode="dedicated",
+        server_id="server-1",
+        socket_path="/run/user/1000/agent-pbx/runtime.sock",
+        session_name="agent-pbx-runtime-operator-6-fork-caller-1",
+        window_id="@1",
+        window_name="operator-6-fork-caller-1",
+        pane_id="%1",
+        pane_pid=123,
+        process_start_ticks=456,
+        codex_session_id="session-1",
+        cwd="/srv/work/project",
+        state="ready",
+        metadata=mapping_metadata,
+    )
+    _patch_ready_terminal(monkeypatch)
+
+    result = _service(store).deliver(_request(request_id="invalid-generation"))
+
+    assert result.outcome == IdleTargetDeliveryOutcome.STALE_MAPPING
+    assert result.reason_code == "runtime_generation_invalid"
 
 
 def test_terminal_capture_classifier_requires_current_prompt() -> None:
