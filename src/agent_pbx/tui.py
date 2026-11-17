@@ -172,7 +172,6 @@ from .runtime_tmux import (
     runtime_pop_plan,
     restore_dedicated_runtime_exit_policy,
     tmux_client_attach_command,
-    tmux_socket_from_environment,
 )
 from .ui import (
     actions as ui_actions,
@@ -180,6 +179,7 @@ from .ui import (
     preferences as ui_preferences,
     presentation_options as ui_presentation_options,
     references as ui_references,
+    runtime as ui_runtime,
     screens as ui_screens,
     widgets as ui_widgets,
 )
@@ -217,7 +217,6 @@ from .ui.palette_history import (
 from .ui.panels.editor import EditorPanelState
 from .ui.panels.joplin import JoplinPanelState
 from .ui.panels.operators import OperatorPanelState
-from .ui.runtime import runtime_header, runtime_topology
 from .ui.theme import PBX_PALETTE, terminal_color_depth, textual_palette
 from .ui.workerbee_config import (
     CALLER_WORKERBEE_PROFILE_METADATA_KEY,
@@ -4599,6 +4598,7 @@ class AgentPBXTUI(App[None]):
         export_dir: Path | str | None = None,
         settings_file: Path | str | None = None,
         v2_defaults: bool = False,
+        host_terminal_identity: ui_runtime.TuiHostTerminalIdentity | None = None,
     ) -> None:
         super().__init__()
         self._campaign_controller = CampaignController(self)
@@ -5137,6 +5137,8 @@ class AgentPBXTUI(App[None]):
         self.remote_view_state_worker_active = False
         self.last_remote_view_state_payload = ""
         self.last_settings_payload = ""
+        self.host_terminal_identity = host_terminal_identity
+        self.host_liveness_lost = False
         self.shutting_down = False
         self.runtime_health_expected_at = 0.0
         self.runtime_health_lag_samples: deque[float] = deque(maxlen=120)
@@ -14367,14 +14369,14 @@ class AgentPBXTUI(App[None]):
         agent_id = self.selected_agent_id
         snapshot = self.codex_runtime_by_agent.get(agent_id or "")
         workerbee = self.workerbee_status_by_agent.get(agent_id or "")
-        rendered = runtime_header(
+        rendered = ui_runtime.runtime_header(
             snapshot,
             workerbee,
             frame=self.codex_runtime_animation_frame,
             color_depth=self.terminal_color_depth,
         )
         status_widget.update(rendered.text)
-        topology = runtime_topology(
+        topology = ui_runtime.runtime_topology(
             snapshot,
             frame=self.codex_runtime_animation_frame,
             color_depth=self.terminal_color_depth,
@@ -15174,43 +15176,23 @@ class AgentPBXTUI(App[None]):
         pane_pid: int,
         expected_start_ticks: int,
     ) -> bool:
-        """Prove that the exact registered process identity no longer exists."""
-
-        observed_ticks = runtime_process_start_ticks(pane_pid)
-        if observed_ticks is not None:
-            return int(observed_ticks) != int(expected_start_ticks)
-        try:
-            os.stat(f"/proc/{pane_pid}")
-        except FileNotFoundError:
-            return True
-        except OSError:
-            return False
-        return False
+        return ui_runtime.runtime_process_identity_is_absent(
+            pane_pid, expected_start_ticks, process_start_reader=runtime_process_start_ticks
+        )
 
     @staticmethod
     def tmux_runtime_mapping_is_on_distinct_server(
         mapping: Mapping[str, Any],
     ) -> bool:
-        """Compare one mapping with the server that owns unqualified pane rows."""
-
-        current_socket = tmux_socket_from_environment(os.getenv("TMUX"))
-        mapped_raw = str(mapping.get("socket_path") or "").strip()
-        mapped_server_id = str(mapping.get("server_id") or "").strip()
-        if current_socket is None or not mapped_raw or not mapped_server_id:
-            return False
-        mapped_socket = Path(mapped_raw).expanduser()
-        if not mapped_socket.is_absolute():
-            return False
-        if runtime_server_id(mapped_socket) != mapped_server_id:
-            return False
-        current_server_id = runtime_server_id(current_socket)
-        return (
-            current_server_id != mapped_server_id
-            and current_socket.resolve(strict=False)
-            != mapped_socket.resolve(strict=False)
-        )
+        return ui_runtime.runtime_mapping_is_on_distinct_server(mapping)
 
     async def acquire_tmux_writer_lease(self, agent_id: str) -> dict[str, Any] | None:
+        if self.host_liveness_lost:
+            self.tmux_runtime_mapping_error_by_agent.setdefault(
+                agent_id,
+                "host terminal liveness was lost; writer reacquisition is disabled"
+            )
+            return None
         if agent_id in self.tmux_stop_in_progress_agent_ids:
             return None
         try:
@@ -15222,6 +15204,11 @@ class AgentPBXTUI(App[None]):
                 },
                 headers=auth_headers(self.token),
             )
+            if response.status_code == 409:
+                self.tmux_runtime_mapping_error_by_agent[agent_id] = (
+                    ui_runtime.writer_lease_unavailable_diagnostic(response)
+                )
+                return None
             response.raise_for_status()
             mapping = response.json()
         except Exception as exc:
@@ -15348,9 +15335,6 @@ class AgentPBXTUI(App[None]):
                 )
             )
         ):
-            # Selection can change while the writer lease request is in
-            # flight. Never let that stale worker replace the terminal for the
-            # newly selected entity.
             await self.release_tmux_writer_lease(agent_id)
             return False
         try:
@@ -15618,6 +15602,8 @@ class AgentPBXTUI(App[None]):
 
     def schedule_tmux_writer_lease_renewal(self) -> None:
         if (
+            self.host_liveness_lost
+            or
             not self.embedded_terminal_agent_id
             or self.embedded_terminal_agent_id in self.tmux_stop_in_progress_agent_ids
         ):
@@ -15631,8 +15617,30 @@ class AgentPBXTUI(App[None]):
 
     async def renew_embedded_tmux_writer_lease_if_active(self) -> None:
         agent_id = self.embedded_terminal_agent_id
-        if not agent_id or agent_id in self.tmux_stop_in_progress_agent_ids:
+        if (
+            self.host_liveness_lost
+            or not agent_id
+            or agent_id in self.tmux_stop_in_progress_agent_ids
+        ):
             return
+        if self.host_terminal_identity is not None:
+            liveness = await asyncio.to_thread(
+                ui_runtime.assess_tui_host_terminal_identity,
+                self.host_terminal_identity,
+            )
+            if not liveness.live:
+                self.host_liveness_lost = True
+                if self.tmux_writer_lease_timer is not None:
+                    self.tmux_writer_lease_timer.stop()
+                    self.tmux_writer_lease_timer = None
+                diagnostic, notice = ui_runtime.orphan_tui_host_diagnostics(
+                    liveness.reason_code
+                )
+                self.tmux_runtime_mapping_error_by_agent[agent_id] = diagnostic
+                await self.detach_embedded_tmux_terminal(release_lease=True)
+                self.notify(notice, severity="error")
+                self.exit()
+                return
         if self.embedded_terminal_surface() is None:
             await self.detach_embedded_tmux_terminal(release_lease=True)
             return
@@ -18123,37 +18131,26 @@ class AgentPBXTUI(App[None]):
                 or mapping.get("codex_session_id")
                 or ""
             ).strip()
-            mapping_metadata = (
-                dict(mapping.get("metadata"))
-                if isinstance(mapping.get("metadata"), dict)
-                else {}
-            )
             response = await self.api_client().post(
                 f"/v2/tmux/runtimes/{quote(agent_id, safe='')}",
-                json={
-                    "server_mode": normalize_runtime_server_mode(
+                json=ui_runtime.in_place_restart_registration_payload(
+                    mapping,
+                    server_mode=normalize_runtime_server_mode(
                         mapping.get("server_mode")
                     ).value,
-                    "socket_path": socket_path,
-                    "session_name": pane.session_name,
-                    "window_id": pane.window_id or pane.window_index,
-                    "window_name": pane.window_name,
-                    "pane_id": pane.pane_id,
-                    "pane_pid": pane_pid,
-                    "process_start_ticks": await asyncio.to_thread(
-                        runtime_process_start_ticks,
-                        pane_pid,
+                    socket_path=socket_path,
+                    session_name=pane.session_name,
+                    window_id=pane.window_id or pane.window_index,
+                    window_name=pane.window_name,
+                    pane_id=pane.pane_id,
+                    pane_pid=pane_pid,
+                    process_start_ticks=await asyncio.to_thread(
+                        runtime_process_start_ticks, pane_pid
                     ),
-                    "codex_session_id": session_id or None,
-                    "cwd": pane.cwd,
-                    "origin_client_tty": mapping.get("origin_client_tty"),
-                    "origin_session_name": mapping.get("origin_session_name"),
-                    "metadata": {
-                        **mapping_metadata,
-                        "mapping_source": "in_place_restart",
-                        "tmux_bin": runtime_kwargs["tmux_bin"],
-                    },
-                },
+                    codex_session_id=session_id or None,
+                    cwd=pane.cwd,
+                    tmux_bin=runtime_kwargs["tmux_bin"],
+                ),
                 headers=auth_headers(self.token),
             )
             response.raise_for_status()
@@ -32950,4 +32947,5 @@ def run_tui(*, server: str, token: str | None = None) -> None:
         server=server,
         token=token,
         v2_defaults=True,
+        host_terminal_identity=ui_runtime.capture_interactive_tui_host_identity(),
     ).run()

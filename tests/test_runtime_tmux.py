@@ -851,6 +851,89 @@ def test_tmux_runtime_api_registers_reconciles_and_leases_writer(
         directory.cleanup()
 
 
+def test_in_place_restart_registration_clears_transient_live_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    socket_path = tmp_path / "tmux.sock"
+    socket_path.write_text("fixture", encoding="utf-8")
+    observed = [pane(pane_pid=100)]
+    monkeypatch.setattr(
+        "agent_pbx.api_routes.runtime.validate_tmux_socket",
+        lambda _path: (True, "ready"),
+    )
+    monkeypatch.setattr(
+        "agent_pbx.api.list_runtime_panes",
+        lambda _identity: tuple(observed),
+    )
+    monkeypatch.setattr(
+        "agent_pbx.api.process_start_ticks",
+        lambda pid: int(pid or 0) * 10,
+    )
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite", token="secret"))
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer secret"}
+    registered = client.post(
+        "/v1/agents/register",
+        headers=headers,
+        json={"agent_id": "agent-a", "project": "demo", "metadata": {}},
+    )
+    assert registered.status_code == 200
+    initial = client.post(
+        "/v2/tmux/runtimes/agent-a",
+        headers=headers,
+        json={
+            "server_mode": "dedicated",
+            "socket_path": str(socket_path),
+            "session_name": observed[0].session_name,
+            "pane_id": observed[0].pane_id,
+            "pane_pid": 100,
+            "metadata": {
+                "kept": True,
+                "last_live_validation": {"state": "missing", "safe": False},
+                "live_validated_at": 123.0,
+            },
+        },
+    )
+    assert initial.status_code == 200
+    app.state.store.append_event(
+        "tmux_runtime_reconciliation_required",
+        {"state": "missing", "safe": False},
+        "agent-a",
+    )
+
+    observed[0] = pane(pane_pid=200)
+    restarted = client.post(
+        "/v2/tmux/runtimes/agent-a",
+        headers=headers,
+        json={
+            "server_mode": "dedicated",
+            "socket_path": str(socket_path),
+            "session_name": observed[0].session_name,
+            "pane_id": observed[0].pane_id,
+            "pane_pid": 200,
+            "metadata": {
+                "kept": True,
+                "mapping_source": "in_place_restart",
+                "last_live_validation": {"state": "missing", "safe": False},
+                "live_validated_at": 123.0,
+            },
+        },
+    )
+    assert restarted.status_code == 200
+    assert restarted.json()["pane_pid"] == 200
+    assert restarted.json()["process_start_ticks"] == 2000
+    assert restarted.json()["metadata"] == {
+        "kept": True,
+        "mapping_source": "in_place_restart",
+    }
+    events = client.get("/v1/events", headers=headers, params={"limit": 100}).json()
+    assert sum(event["type"] == "tmux_runtime_registered" for event in events) == 2
+    assert any(
+        event["type"] == "tmux_runtime_reconciliation_required" for event in events
+    )
+
+
 def test_tmux_runtime_api_rejects_recursive_session(tmp_path: Path, monkeypatch) -> None:
     directory, socket_path = short_socket_path()
     server = bind_socket(socket_path)

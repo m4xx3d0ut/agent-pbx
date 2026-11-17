@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import stat
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+import pytest
 
 from agent_pbx.api import create_app
 from agent_pbx.codex.runtime import CodexRuntimeService
 from agent_pbx.config import ServerConfig
 from agent_pbx.contracts import CodexRuntimeState
-from agent_pbx.ui.runtime import runtime_header, runtime_topology
+from agent_pbx.ui.runtime import (
+    assess_tui_host_terminal_identity,
+    capture_interactive_tui_host_identity,
+    runtime_header,
+    runtime_topology,
+)
 from agent_pbx.ui.theme import (
     CYBERPUNK_PALETTE,
     PBX_PALETTE,
@@ -23,6 +31,103 @@ from agent_pbx.tui import AgentPBXTUI
 
 
 HEADERS = {"Authorization": "Bearer secret"}
+
+
+class FakeTerminalStream:
+    def __init__(self, *, interactive: bool, fd: int = 7) -> None:
+        self.interactive = interactive
+        self.fd = fd
+
+    def isatty(self) -> bool:
+        return self.interactive
+
+    def fileno(self) -> int:
+        return self.fd
+
+
+def terminal_stat(*, inode: int = 22) -> SimpleNamespace:
+    return SimpleNamespace(
+        st_mode=stat.S_IFCHR | 0o600,
+        st_dev=11,
+        st_ino=inode,
+        st_rdev=33,
+    )
+
+
+def test_host_terminal_identity_is_disabled_for_noninteractive_launch() -> None:
+    assert (
+        capture_interactive_tui_host_identity(
+            stdin=FakeTerminalStream(interactive=False),
+            stdout=FakeTerminalStream(interactive=True),
+            process_start_reader=lambda _pid: pytest.fail(
+                "noninteractive launch must not inspect its parent"
+            ),
+        )
+        is None
+    )
+
+
+def test_host_terminal_identity_proves_exact_parent_and_terminal() -> None:
+    identity = capture_interactive_tui_host_identity(
+        stdin=FakeTerminalStream(interactive=True),
+        stdout=FakeTerminalStream(interactive=True),
+        getppid=lambda: 42,
+        fstat=lambda _fd: terminal_stat(),  # type: ignore[arg-type]
+        ttyname=lambda _fd: "/dev/pts/7",
+        tcgetpgrp=lambda _fd: 99,
+        process_start_reader=lambda _pid: 1234,
+    )
+    assert identity is not None
+    assert identity.parent_pid == 42
+    assert identity.parent_start_ticks == 1234
+
+    assessment = assess_tui_host_terminal_identity(
+        identity,
+        getppid=lambda: 42,
+        fstat=lambda _fd: terminal_stat(),  # type: ignore[arg-type]
+        ttyname=lambda _fd: "/dev/pts/7",
+        tcgetpgrp=lambda _fd: 99,
+        process_start_reader=lambda _pid: 1234,
+    )
+    assert assessment.live is True
+    assert assessment.reason_code == "live"
+
+
+@pytest.mark.parametrize(
+    ("parent_pid", "parent_ticks", "inode", "reason"),
+    (
+        (43, 1234, 22, "parent_changed"),
+        (42, 1235, 22, "parent_identity_changed"),
+        (42, 1234, 23, "host_terminal_changed"),
+    ),
+)
+def test_host_terminal_identity_fails_closed_on_drift(
+    parent_pid: int,
+    parent_ticks: int,
+    inode: int,
+    reason: str,
+) -> None:
+    identity = capture_interactive_tui_host_identity(
+        stdin=FakeTerminalStream(interactive=True),
+        stdout=FakeTerminalStream(interactive=True),
+        getppid=lambda: 42,
+        fstat=lambda _fd: terminal_stat(),  # type: ignore[arg-type]
+        ttyname=lambda _fd: "/dev/pts/7",
+        tcgetpgrp=lambda _fd: 99,
+        process_start_reader=lambda _pid: 1234,
+    )
+    assert identity is not None
+
+    assessment = assess_tui_host_terminal_identity(
+        identity,
+        getppid=lambda: parent_pid,
+        fstat=lambda _fd: terminal_stat(inode=inode),  # type: ignore[arg-type]
+        ttyname=lambda _fd: "/dev/pts/7",
+        tcgetpgrp=lambda _fd: 99,
+        process_start_reader=lambda _pid: parent_ticks,
+    )
+    assert assessment.live is False
+    assert assessment.reason_code == reason
 
 
 def runtime_client(tmp_path: Path) -> tuple[TestClient, object]:

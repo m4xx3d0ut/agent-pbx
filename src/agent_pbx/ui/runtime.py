@@ -2,11 +2,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+import os
+from pathlib import Path
+import stat
+import sys
+from typing import Any, Callable
 
 from rich.text import Text
 
 from ..contracts import CodexRuntimeState
+from ..runtime_tmux import (
+    process_start_ticks,
+    runtime_server_id,
+    tmux_socket_from_environment,
+)
 from .theme import PBX_PALETTE, runtime_color
 
 
@@ -48,6 +57,206 @@ class RuntimeHeader:
     text: Text
     state: CodexRuntimeState
     animated: bool
+
+
+@dataclass(frozen=True)
+class TuiHostTerminalIdentity:
+    """Ephemeral identity of the interactive terminal that launched one TUI."""
+
+    terminal_fd: int
+    terminal_path: str
+    terminal_device: int
+    terminal_inode: int
+    terminal_rdevice: int
+    parent_pid: int
+    parent_start_ticks: int | None
+
+
+@dataclass(frozen=True)
+class TuiHostLiveness:
+    live: bool
+    reason_code: str
+
+
+def capture_interactive_tui_host_identity(
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    getppid: Callable[[], int] = os.getppid,
+    fstat: Callable[[int], os.stat_result] = os.fstat,
+    ttyname: Callable[[int], str] = os.ttyname,
+    tcgetpgrp: Callable[[int], int] = os.tcgetpgrp,
+    process_start_reader: Callable[[int | None], int | None] = process_start_ticks,
+) -> TuiHostTerminalIdentity | None:
+    """Capture host identity only for a real interactive TUI launch."""
+
+    input_stream = sys.stdin if stdin is None else stdin
+    output_stream = sys.stdout if stdout is None else stdout
+    try:
+        if not input_stream.isatty() or not output_stream.isatty():
+            return None
+        terminal_fd = int(input_stream.fileno())
+        terminal_stat = fstat(terminal_fd)
+        terminal_path = os.path.realpath(ttyname(terminal_fd))
+        parent_pid = int(getppid())
+        if (
+            terminal_fd < 0
+            or not stat.S_ISCHR(terminal_stat.st_mode)
+            or int(tcgetpgrp(terminal_fd)) <= 0
+            or not terminal_path
+            or parent_pid <= 1
+        ):
+            return None
+        parent_ticks = process_start_reader(parent_pid)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    return TuiHostTerminalIdentity(
+        terminal_fd=terminal_fd,
+        terminal_path=terminal_path,
+        terminal_device=int(terminal_stat.st_dev),
+        terminal_inode=int(terminal_stat.st_ino),
+        terminal_rdevice=int(terminal_stat.st_rdev),
+        parent_pid=parent_pid,
+        parent_start_ticks=(int(parent_ticks) if parent_ticks is not None else None),
+    )
+
+
+def assess_tui_host_terminal_identity(
+    identity: TuiHostTerminalIdentity,
+    *,
+    getppid: Callable[[], int] = os.getppid,
+    fstat: Callable[[int], os.stat_result] = os.fstat,
+    ttyname: Callable[[int], str] = os.ttyname,
+    tcgetpgrp: Callable[[int], int] = os.tcgetpgrp,
+    process_start_reader: Callable[[int | None], int | None] = process_start_ticks,
+) -> TuiHostLiveness:
+    """Prove that the exact launch parent and host terminal remain live."""
+
+    try:
+        if int(getppid()) != identity.parent_pid:
+            return TuiHostLiveness(False, "parent_changed")
+        observed_ticks = process_start_reader(identity.parent_pid)
+        if (
+            identity.parent_start_ticks is not None
+            and observed_ticks != identity.parent_start_ticks
+        ):
+            return TuiHostLiveness(False, "parent_identity_changed")
+        terminal_stat = fstat(identity.terminal_fd)
+        terminal_path = os.path.realpath(ttyname(identity.terminal_fd))
+        terminal_group = int(tcgetpgrp(identity.terminal_fd))
+    except (OSError, TypeError, ValueError):
+        return TuiHostLiveness(False, "host_terminal_unavailable")
+    if (
+        not stat.S_ISCHR(terminal_stat.st_mode)
+        or int(terminal_stat.st_dev) != identity.terminal_device
+        or int(terminal_stat.st_ino) != identity.terminal_inode
+        or int(terminal_stat.st_rdev) != identity.terminal_rdevice
+        or terminal_path != identity.terminal_path
+        or terminal_group <= 0
+    ):
+        return TuiHostLiveness(False, "host_terminal_changed")
+    return TuiHostLiveness(True, "live")
+
+
+def runtime_process_identity_is_absent(
+    pane_pid: int,
+    expected_start_ticks: int,
+    *,
+    process_start_reader: Callable[[int | None], int | None] = process_start_ticks,
+) -> bool:
+    """Prove that an exact registered process identity no longer exists."""
+
+    observed_ticks = process_start_reader(pane_pid)
+    if observed_ticks is not None:
+        return int(observed_ticks) != int(expected_start_ticks)
+    try:
+        os.stat(f"/proc/{pane_pid}")
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def runtime_mapping_is_on_distinct_server(
+    mapping: Mapping[str, Any],
+    *,
+    tmux_environment: str | None = None,
+) -> bool:
+    """Compare one mapping with the server owning unqualified pane rows."""
+
+    current_socket = tmux_socket_from_environment(
+        os.getenv("TMUX") if tmux_environment is None else tmux_environment
+    )
+    mapped_raw = str(mapping.get("socket_path") or "").strip()
+    mapped_server_id = str(mapping.get("server_id") or "").strip()
+    if current_socket is None or not mapped_raw or not mapped_server_id:
+        return False
+    mapped_socket = Path(mapped_raw).expanduser()
+    if not mapped_socket.is_absolute() or runtime_server_id(mapped_socket) != mapped_server_id:
+        return False
+    return (
+        runtime_server_id(current_socket) != mapped_server_id
+        and current_socket.resolve(strict=False) != mapped_socket.resolve(strict=False)
+    )
+
+
+def in_place_restart_registration_payload(
+    mapping: Mapping[str, Any],
+    *,
+    server_mode: str,
+    socket_path: str,
+    session_name: str,
+    window_id: str | None,
+    window_name: str | None,
+    pane_id: str,
+    pane_pid: int,
+    process_start_ticks: int | None,
+    codex_session_id: str | None,
+    cwd: str,
+    tmux_bin: str,
+) -> dict[str, Any]:
+    """Build a restart registration without stale transient validation."""
+
+    metadata = dict(mapping.get("metadata") or {})
+    metadata.pop("last_live_validation", None)
+    metadata.pop("live_validated_at", None)
+    metadata.update(mapping_source="in_place_restart", tmux_bin=tmux_bin)
+    return {
+        "server_mode": server_mode,
+        "socket_path": socket_path,
+        "session_name": session_name,
+        "window_id": window_id,
+        "window_name": window_name,
+        "pane_id": pane_id,
+        "pane_pid": pane_pid,
+        "process_start_ticks": process_start_ticks,
+        "codex_session_id": codex_session_id,
+        "cwd": cwd,
+        "origin_client_tty": mapping.get("origin_client_tty"),
+        "origin_session_name": mapping.get("origin_session_name"),
+        "metadata": metadata,
+    }
+
+
+def writer_lease_unavailable_diagnostic(response: Any) -> str:
+    try:
+        detail = str(response.json().get("detail") or "lease conflict")
+    except (AttributeError, TypeError, ValueError):
+        detail = "lease conflict"
+    return (
+        f"writer lease unavailable: {detail}; this TUI remains read-only "
+        "and the managed runtime was not restarted"
+    )
+
+
+def orphan_tui_host_diagnostics(reason_code: str) -> tuple[str, str]:
+    return (
+        f"host terminal liveness lost ({reason_code}); writer reacquisition is "
+        "disabled and the managed runtime was not restarted",
+        "The interactive host terminal is no longer live; this orphan TUI released "
+        "its writer lease and is exiting without changing the runtime.",
+    )
 
 
 def runtime_state(snapshot: Mapping[str, Any] | None) -> CodexRuntimeState:

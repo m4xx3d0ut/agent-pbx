@@ -511,6 +511,10 @@ def register_runtime_routes(
             raise HTTPException(
                 status_code=409, detail="tmux pane process start evidence changed"
             )
+        mapping_metadata = dict(payload.metadata)
+        if mapping_metadata.get("mapping_source") == "in_place_restart":
+            mapping_metadata.pop("last_live_validation", None)
+            mapping_metadata.pop("live_validated_at", None)
         mapping = store.upsert_tmux_runtime_mapping(
             entity_id=entity_id,
             server_mode=mode.value,
@@ -527,7 +531,7 @@ def register_runtime_routes(
             origin_client_tty=payload.origin_client_tty,
             origin_session_name=payload.origin_session_name,
             state="ready",
-            metadata=payload.metadata,
+            metadata=mapping_metadata,
         )
         store.append_event("tmux_runtime_registered", mapping, entity_id)
         return mapping

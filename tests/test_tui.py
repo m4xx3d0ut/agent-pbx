@@ -143,6 +143,7 @@ from agent_pbx.workerbee_mcp import (
 )
 from agent_pbx.ui.palette_history import CommandInput, PaletteHistoryScreen
 from agent_pbx.ui.navigation import NavigationDestination
+from agent_pbx.ui.runtime import TuiHostLiveness, TuiHostTerminalIdentity
 from textual.app import App, ComposeResult
 from textual.events import Click, Key, MouseDown
 from textual.widgets import (
@@ -194,6 +195,18 @@ def cache_ready_runtime_mapping(
         "metadata": {"tmux_bin": "/opt/tmux-3.7c"},
     }
     app.tmux_runtime_mapping_validated_at_by_agent[agent_id] = time.monotonic()
+
+
+def tui_host_identity() -> TuiHostTerminalIdentity:
+    return TuiHostTerminalIdentity(
+        terminal_fd=0,
+        terminal_path="/dev/pts/88",
+        terminal_device=1,
+        terminal_inode=2,
+        terminal_rdevice=3,
+        parent_pid=44,
+        parent_start_ticks=55,
+    )
 
 
 def inactive_missing_runtime_mapping(
@@ -532,6 +545,11 @@ def test_run_tui_selects_native_default_only_for_local_server(
             calls[-1]["ran"] = True
 
     monkeypatch.setattr("agent_pbx.tui.AgentPBXTUI", FakeApp)
+    identity = tui_host_identity()
+    monkeypatch.setattr(
+        "agent_pbx.tui.ui_runtime.capture_interactive_tui_host_identity",
+        lambda: identity,
+    )
     monkeypatch.setenv("AGENT_PBX_TUI_RUNTIME_ROOT", str(tmp_path))
 
     run_tui(server="http://127.0.0.1:8765", token="local")
@@ -542,12 +560,14 @@ def test_run_tui_selects_native_default_only_for_local_server(
             "server": "http://127.0.0.1:8765",
             "token": "local",
             "v2_defaults": True,
+            "host_terminal_identity": identity,
             "ran": True,
         },
         {
             "server": "https://pbx.example.test",
             "token": "remote",
             "v2_defaults": True,
+            "host_terminal_identity": identity,
             "ran": True,
         },
     ]
@@ -5890,6 +5910,171 @@ async def test_tui_tmux_toggle_hotkey_only_from_latest() -> None:
 
     assert captures == ["agent-1"]
     assert reports == ["agent-1"]
+
+
+async def test_tui_live_host_terminal_renews_writer_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+        host_terminal_identity=tui_host_identity(),
+    )
+    posts: list[str] = []
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"state": "ready", "server_id": "server", "pane_id": "%7"}
+
+    class Client:
+        async def post(self, path: str, **_kwargs: object) -> Response:
+            posts.append(path)
+            return Response()
+
+    class FakeProcess:
+        alive = True
+
+        def close(self) -> None:
+            self.alive = False
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.ui_runtime.assess_tui_host_terminal_identity",
+        lambda _identity: TuiHostLiveness(True, "live"),
+    )
+    app.api_client = lambda: Client()  # type: ignore[method-assign]
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        app.tmux_direct_agent_modes["agent-1"] = True
+        app.embedded_terminal_agent_id = "agent-1"
+        app.embedded_terminal_target = "server:%7"
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        surface.process = FakeProcess()  # type: ignore[assignment]
+        surface.target = "server:%7"
+
+        await app.renew_embedded_tmux_writer_lease_if_active()
+
+    assert posts == [
+        "/v2/tmux/runtimes/agent-1/writer/acquire",
+        "/v2/tmux/runtimes/agent-1/writer/release",
+    ]
+    assert app.host_liveness_lost is False
+
+
+@pytest.mark.parametrize(
+    "reason_code",
+    ("parent_changed", "host_terminal_unavailable"),
+)
+async def test_tui_orphan_host_releases_writer_and_cannot_reacquire(
+    reason_code: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        tmux_direct=True,
+        host_terminal_identity=tui_host_identity(),
+    )
+    mapping = {
+        "state": "ready",
+        "server_id": "server",
+        "pane_id": "%7",
+        "pane_pid": 700,
+        "process_start_ticks": 800,
+    }
+    app.tmux_runtime_mapping_by_agent["agent-1"] = dict(mapping)
+    posts: list[str] = []
+    exits: list[bool] = []
+    notices: list[str] = []
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class Client:
+        async def post(self, path: str, **_kwargs: object) -> Response:
+            posts.append(path)
+            return Response()
+
+    class FakeProcess:
+        alive = True
+
+        def close(self) -> None:
+            self.alive = False
+
+    monkeypatch.setattr(
+        "agent_pbx.tui.ui_runtime.assess_tui_host_terminal_identity",
+        lambda _identity: TuiHostLiveness(False, reason_code),
+    )
+    app.api_client = lambda: Client()  # type: ignore[method-assign]
+    app.exit = lambda *_args, **_kwargs: exits.append(True)  # type: ignore[method-assign]
+    app.notify = lambda message, **_kwargs: notices.append(message)  # type: ignore[method-assign]
+    async with app.run_test():
+        app.selected_agent_id = "agent-1"
+        app.active_agent_tab = "latest-tab"
+        app.embedded_terminal_v2_enabled = True
+        app.tmux_direct_agent_modes["agent-1"] = True
+        app.embedded_terminal_agent_id = "agent-1"
+        app.embedded_terminal_target = "server:%7"
+        surface = app.query_one("#pbx-terminal-surface", PbxTerminalSurface)
+        process = FakeProcess()
+        surface.process = process  # type: ignore[assignment]
+        surface.target = "server:%7"
+
+        await app.renew_embedded_tmux_writer_lease_if_active()
+        assert await app.acquire_tmux_writer_lease("agent-1") is None
+
+    assert posts == ["/v2/tmux/runtimes/agent-1/writer/release"]
+    assert app.tmux_runtime_mapping_by_agent["agent-1"] == mapping
+    assert app.host_liveness_lost is True
+    assert app.embedded_terminal_agent_id is None
+    assert process.alive is False
+    assert exits == [True]
+    assert any("without changing the runtime" in notice for notice in notices)
+    assert "managed runtime was not restarted" in app.tmux_runtime_mapping_error_by_agent[
+        "agent-1"
+    ]
+
+
+async def test_tui_writer_conflict_is_precise_and_keeps_read_only_mapping() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", token="secret")
+    mapping = {
+        "entity_id": "agent-1",
+        "writer_client_id": "other-tui",
+        "writer_lease_active": True,
+    }
+    app.tmux_runtime_mapping_by_agent["agent-1"] = dict(mapping)
+    posts: list[str] = []
+
+    class Response:
+        status_code = 409
+
+        def json(self) -> dict[str, str]:
+            return {"detail": "tmux runtime writer is leased to 'other-tui'"}
+
+    class Client:
+        async def post(self, path: str, **_kwargs: object) -> Response:
+            posts.append(path)
+            return Response()
+
+    app.api_client = lambda: Client()  # type: ignore[method-assign]
+
+    assert await app.acquire_tmux_writer_lease("agent-1") is None
+    assert posts == ["/v2/tmux/runtimes/agent-1/writer/acquire"]
+    assert app.tmux_runtime_mapping_by_agent["agent-1"] == mapping
+    diagnostic = app.tmux_runtime_mapping_error_by_agent["agent-1"]
+    assert "leased to 'other-tui'" in diagnostic
+    assert "remains read-only" in diagnostic
+    assert "managed runtime was not restarted" in diagnostic
 
 
 async def test_tui_disabling_direct_mode_detaches_and_cannot_reacquire_writer(
@@ -20300,12 +20485,22 @@ async def test_tui_refreshes_runtime_process_evidence_after_in_place_restart(
         "codex_session_id": "session-1",
         "origin_client_tty": "/dev/pts/4",
         "origin_session_name": "agent-pbx",
-        "metadata": {"tmux_bin": "/opt/tmux-3.7c", "kept": True},
+        "metadata": {
+            "tmux_bin": "/opt/tmux-3.7c",
+            "kept": True,
+            "last_live_validation": {"state": "missing", "safe": False},
+            "live_validated_at": 123.0,
+        },
     }
     refreshed = {
         **mapping,
         "pane_pid": 4321,
         "process_start_ticks": 9876,
+        "metadata": {
+            "tmux_bin": "/opt/tmux-3.7c",
+            "kept": True,
+            "mapping_source": "in_place_restart",
+        },
     }
     app.tmux_runtime_mapping_by_agent["agent-1"] = mapping
     app.agents = {
