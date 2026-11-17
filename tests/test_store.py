@@ -43,7 +43,6 @@ def test_agent_summary_keeps_pending_handoff_approval_durable(
     by_id = {agent["agent_id"]: agent for agent in store.list_agents()}
     assert by_id["operator-0"]["pending_handoff_approval_count"] == 0
 
-
 @pytest.mark.parametrize("report_status", ["working", "waiting"])
 def test_operator_stale_status_precedes_report_state_but_not_durable_work(
     tmp_path: Path,
@@ -171,6 +170,86 @@ def test_cancel_operator_handoff_is_atomic_and_clears_pending_summary(
     )
     assert store.get_operator_handoff(raced["handoff_id"])["status"] == "sent"
 
+
+def test_workflow_projection_exposes_campaign_context_and_report_precedence(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0",
+            project="operator",
+            agent_type="operator",
+            metadata={"cwd": str(tmp_path / "operator")},
+        )
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={"cwd": str(tmp_path / "caller")},
+        )
+    )
+    stale_block = store.create_report(
+        "operator-0",
+        ReportCreateRequest(
+            project="operator",
+            status="blocked",
+            summary="Prior work blocked",
+            detail="This report predates the new campaign.",
+        ),
+    )
+    campaign = store.create_operator_campaign(
+        operator_agent_id="operator-0",
+        title="Newer campaign",
+        objective="Continue with newer durable work.",
+        criteria=[],
+        assignments=[
+            {
+                "target_agent_id": "caller-1",
+                "prompt": "Proceed.",
+                "delivery_topology": "direct_caller",
+            }
+        ],
+    )
+
+    by_id = {agent["agent_id"]: agent for agent in store.list_agents()}
+    operator = by_id["operator-0"]
+    assert operator["workflow_state"] == "running"
+    assert operator["workflow_source"] == "campaign"
+    assert operator["workflow_subject_id"] == campaign["campaign_id"]
+    assert operator["workflow_secondary_source"] == "latest_report"
+    assert operator["workflow_secondary_subject_id"] == stale_block["report_id"]
+    assert operator["workflow_report_superseded"] is True
+    assert operator["workflow_precedence_reason"] == (
+        "newer_active_campaign_superseded_terminal_report"
+    )
+    assert operator["workflow_flow"] == "1 camp · prior blocked"
+    caller = by_id["caller-1"]
+    assert caller["workflow_state"] == "assigned"
+    assert caller["workflow_source"] == "campaign_assignment"
+    assert caller["workflow_subject_id"] == campaign["campaign_id"]
+
+    current_block = store.create_report(
+        "operator-0",
+        ReportCreateRequest(
+            project="operator",
+            status="blocked",
+            summary="Current campaign blocked",
+            detail="This report is newer than the active campaign transition.",
+            metadata={"campaign_id": campaign["campaign_id"]},
+        ),
+    )
+    operator = {agent["agent_id"]: agent for agent in store.list_agents()}[
+        "operator-0"
+    ]
+    assert operator["workflow_state"] == "blocked"
+    assert operator["workflow_subject_id"] == current_block["report_id"]
+    assert operator["workflow_secondary_source"] == "campaign"
+    assert operator["workflow_secondary_subject_id"] == campaign["campaign_id"]
+    assert operator["workflow_flow"] == "1 camp · blocked"
+    assert operator["workflow_report_superseded"] is False
 
 def test_model_elevation_request_is_idempotent_under_concurrency(
     tmp_path: Path,

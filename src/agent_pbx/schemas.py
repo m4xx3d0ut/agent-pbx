@@ -415,6 +415,8 @@ class AgentResponse(BaseModel):
     usage_warning: str | None = None
     latest_report_id: str | None = None
     latest_report_created_at: float | None = None
+    latest_report_age_seconds: float | None = None
+    latest_report_campaign_id: str | None = None
     latest_report_seen_at: float | None = None
     latest_report_status: str | None = None
     latest_report_needs_input: bool = False
@@ -422,6 +424,9 @@ class AgentResponse(BaseModel):
     latest_report_action_required: bool = False
     latest_report_suppress_tui_alerts: bool = False
     active_campaign_count: int = 0
+    latest_active_campaign_id: str | None = None
+    latest_active_campaign_status: str | None = None
+    latest_active_campaign_updated_at: float | None = None
     pending_handoff_approval_count: int = 0
     oldest_pending_handoff_created_at: float | None = None
     ready_handoff_action_count: int = 0
@@ -441,6 +446,12 @@ class AgentResponse(BaseModel):
     workflow_source: str = "agent_status"
     workflow_subject_id: str | None = None
     workflow_flow: str = ""
+    workflow_primary_at: float | None = None
+    workflow_secondary_source: str | None = None
+    workflow_secondary_subject_id: str | None = None
+    workflow_secondary_at: float | None = None
+    workflow_precedence_reason: str = "no_active_workflow"
+    workflow_report_superseded: bool = False
 
 
 class OperatorAlertAcknowledgementItem(BaseModel):

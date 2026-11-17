@@ -5654,6 +5654,9 @@ async def test_tui_selected_operator_detail_exposes_workflow_reason_and_source()
                 "workflow_reason": "One completion receipt awaits review",
                 "workflow_source": "handoff_completion_delivery",
                 "workflow_subject_id": "completion-1",
+                "workflow_precedence_reason": "durable_completion_receipt",
+                "workflow_secondary_source": "campaign",
+                "workflow_secondary_subject_id": "campaign-1",
             }
         }
         await app.load_latest_report("operator-0")
@@ -5663,6 +5666,8 @@ async def test_tui_selected_operator_detail_exposes_workflow_reason_and_source()
     assert "Workflow Reason: One completion receipt awaits review" in detail
     assert "Workflow Source: handoff_completion_delivery" in detail
     assert "Workflow Subject ID: completion-1" in detail
+    assert "Workflow Precedence: durable_completion_receipt" in detail
+    assert "Workflow Secondary: campaign / campaign-1" in detail
 
 
 def test_tui_operator_columns_keep_state_visible_before_identity_on_all_layouts() -> None:

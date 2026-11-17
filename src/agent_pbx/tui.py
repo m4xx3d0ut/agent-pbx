@@ -11891,6 +11891,11 @@ class AgentPBXTUI(App[None]):
             f"Workflow Source: {str(agent.get('workflow_source') or '-').strip()}",
             "Workflow Subject ID: "
             f"{str(agent.get('workflow_subject_id') or '-').strip()}",
+            "Workflow Precedence: "
+            f"{str(agent.get('workflow_precedence_reason') or '-').strip()}",
+            "Workflow Secondary: "
+            f"{str(agent.get('workflow_secondary_source') or '-').strip()} / "
+            f"{str(agent.get('workflow_secondary_subject_id') or '-').strip()}",
         ]
 
     def infer_tmux_working_status(self, agent: dict[str, Any], status: str) -> bool:

@@ -10756,12 +10756,17 @@ class Store:
         data["usage_warning"] = None
         data["latest_report_id"] = None
         data["latest_report_created_at"] = None
+        data["latest_report_age_seconds"] = None
+        data["latest_report_campaign_id"] = None
         data["latest_report_status"] = None
         data["latest_report_needs_input"] = False
         data["latest_report_plan_option_count"] = 0
         data["latest_report_action_required"] = False
         data["latest_report_suppress_tui_alerts"] = False
         data["active_campaign_count"] = 0
+        data["latest_active_campaign_id"] = None
+        data["latest_active_campaign_status"] = None
+        data["latest_active_campaign_updated_at"] = None
         data["pending_completion_delivery_count"] = 0
         data["failed_completion_delivery_count"] = 0
         data["oldest_completion_delivery_at"] = None
@@ -10773,6 +10778,12 @@ class Store:
         data["workflow_source"] = "agent_status"
         data["workflow_subject_id"] = None
         data["workflow_flow"] = ""
+        data["workflow_primary_at"] = None
+        data["workflow_secondary_source"] = None
+        data["workflow_secondary_subject_id"] = None
+        data["workflow_secondary_at"] = None
+        data["workflow_precedence_reason"] = "no_active_workflow"
+        data["workflow_report_superseded"] = False
         return data
 
     @staticmethod
@@ -10827,6 +10838,14 @@ class Store:
         )
         agent["latest_report_id"] = row["report_id"]
         agent["latest_report_created_at"] = row["created_at"]
+        agent["latest_report_age_seconds"] = max(
+            0.0, now_ts() - float(row["created_at"])
+        )
+        agent["latest_report_campaign_id"] = (
+            str(report_metadata.get("campaign_id") or "").strip() or None
+            if isinstance(report_metadata, dict)
+            else None
+        )
         agent["latest_report_status"] = row["status"]
         agent["latest_report_needs_input"] = needs_input
         agent["latest_report_plan_option_count"] = option_count
@@ -10865,28 +10884,56 @@ class Store:
             )
             row = conn.execute(
                 f"""
-                SELECT COUNT(*) AS active_count
+                SELECT COUNT(*) AS active_count, MAX(updated_at) AS latest_updated_at
                 FROM operator_campaigns
                 WHERE operator_agent_id = ?
                   AND {active_status_filter}
                 """,
                 (agent_id,),
             ).fetchone()
+            latest = conn.execute(
+                f"""
+                SELECT campaign_id, status, updated_at
+                FROM operator_campaigns
+                WHERE operator_agent_id = ?
+                  AND {active_status_filter}
+                ORDER BY updated_at DESC, campaign_id ASC
+                LIMIT 1
+                """,
+                (agent_id,),
+            ).fetchone()
         else:
-            active_state_filter = _operator_active_state_sql(
-                "state",
-                "completed_at",
-            )
             row = conn.execute(
                 f"""
-                SELECT COUNT(*) AS active_count
-                FROM operator_campaign_assignments
-                WHERE target_agent_id = ?
-                  AND {active_state_filter}
+                SELECT COUNT(*) AS active_count, MAX(a.updated_at) AS latest_updated_at
+                FROM operator_campaign_assignments AS a
+                WHERE a.target_agent_id = ?
+                  AND {_operator_active_state_sql('a.state', 'a.completed_at')}
+                """,
+                (agent_id,),
+            ).fetchone()
+            latest = conn.execute(
+                f"""
+                SELECT c.campaign_id, c.status, a.updated_at
+                FROM operator_campaign_assignments AS a
+                JOIN operator_campaigns AS c ON c.campaign_id = a.campaign_id
+                WHERE a.target_agent_id = ?
+                  AND {_operator_active_state_sql('a.state', 'a.completed_at')}
+                ORDER BY a.updated_at DESC, a.assignment_id ASC
+                LIMIT 1
                 """,
                 (agent_id,),
             ).fetchone()
         agent["active_campaign_count"] = int(row["active_count"] or 0) if row else 0
+        agent["latest_active_campaign_id"] = (
+            str(latest["campaign_id"]) if latest is not None else None
+        )
+        agent["latest_active_campaign_status"] = (
+            str(latest["status"]) if latest is not None else None
+        )
+        agent["latest_active_campaign_updated_at"] = (
+            float(latest["updated_at"]) if latest is not None else None
+        )
 
     @staticmethod
     def _add_handoff_approval_summary(
@@ -11042,7 +11089,23 @@ class Store:
         conn: sqlite3.Connection,
         agent: dict[str, Any],
     ) -> None:
+        active_campaigns = int(agent.get("active_campaign_count") or 0)
+        campaign_id = str(agent.get("latest_active_campaign_id") or "") or None
+        campaign_at = agent.get("latest_active_campaign_updated_at")
         if agent.get("agent_type") != OPERATOR_AGENT_TYPE:
+            if active_campaigns:
+                agent["workflow_state"] = "assigned"
+                agent["workflow_label"] = "◆ CAMP"
+                agent["workflow_reason"] = (
+                    f"Caller has {active_campaigns} active campaign assignment(s)"
+                )
+                agent["workflow_source"] = "campaign_assignment"
+                agent["workflow_subject_id"] = campaign_id
+                agent["workflow_flow"] = f"{active_campaigns} camp"
+                agent["workflow_primary_at"] = campaign_at
+                agent["workflow_precedence_reason"] = (
+                    "active_caller_assignment"
+                )
             return
         status = str(
             agent.get("latest_report_status")
@@ -11061,7 +11124,30 @@ class Store:
         active_controlled_runs = int(
             agent.get("active_workerbee_controlled_run_count") or 0
         )
-        active_campaigns = int(agent.get("active_campaign_count") or 0)
+        report_at = agent.get("latest_report_created_at")
+        report_id = str(agent.get("latest_report_id") or "") or None
+        report_campaign_id = str(agent.get("latest_report_campaign_id") or "") or None
+        terminal_report = (
+            status in {
+                "failed",
+                "error",
+                "blocked",
+                "done",
+                "complete",
+                "completed",
+                "canceled",
+                "cancelled",
+            }
+            or status.startswith(("failed_", "blocked_"))
+        )
+        report_superseded = bool(
+            terminal_report
+            and active_campaigns
+            and report_at is not None
+            and campaign_at is not None
+            and float(campaign_at) > float(report_at)
+            and (report_campaign_id is None or report_campaign_id != campaign_id)
+        )
 
         state = "idle"
         label = "◇ IDLE"
@@ -11069,14 +11155,23 @@ class Store:
         source = "agent_status"
         subject_id: str | None = None
         flow = ""
-        if status in {"failed", "error"} or status.startswith("failed_"):
+        precedence_reason = "agent_status_fallback"
+        if not report_superseded and (
+            status in {"failed", "error"} or status.startswith("failed_")
+        ):
             state, label = "failed", "✕ FAIL"
             reason = "Latest Operator report failed"
             source = "latest_report"
-        elif status == "blocked" or status.startswith("blocked_"):
+            subject_id = report_id
+            precedence_reason = "latest_terminal_report"
+        elif not report_superseded and (
+            status == "blocked" or status.startswith("blocked_")
+        ):
             state, label = "blocked", "■ BLOCK"
             reason = "Latest Operator report is blocked"
             source = "latest_report"
+            subject_id = report_id
+            precedence_reason = "latest_terminal_report"
         elif pending_controlled_runs:
             state, label = "approval", "! WB RUN"
             reason = f"{pending_controlled_runs} WorkerBee controlled run(s) await approval"
@@ -11085,6 +11180,7 @@ class Store:
                 agent.get("oldest_workerbee_controlled_run_request_id") or ""
             ) or None
             flow = "WB approval"
+            precedence_reason = "durable_workerbee_approval"
         elif pending_approvals:
             state, label = "approval", "! APPROVE"
             reason = f"{pending_approvals} outgoing handoff approval(s) pending"
@@ -11103,6 +11199,7 @@ class Store:
             if outgoing is not None:
                 subject_id = str(outgoing["handoff_id"])
                 flow = f"→{outgoing['target_operator_agent_id']} !"
+            precedence_reason = "durable_handoff_approval"
         elif pending_receipts:
             state, label = "review", "⇠ REVIEW"
             reason = f"{pending_receipts} completion receipt(s) await review"
@@ -11112,53 +11209,106 @@ class Store:
                 agent.get("latest_completion_target_operator_agent_id") or ""
             )
             flow = f"←{target} ✓" if target else "← receipt"
+            precedence_reason = "durable_completion_receipt"
         elif bool(agent.get("latest_report_action_required")):
             state, label = "input", "? INPUT"
             reason = "Latest Operator report requires input"
             source = "latest_report"
+            subject_id = report_id
+            precedence_reason = "latest_report_requires_input"
         elif ready_actions:
             state, label = "action", "! ACTION"
             reason = f"{ready_actions} guarded action(s) are ready"
             source = "handoff_action"
             flow = f"{ready_actions} action"
+            precedence_reason = "durable_handoff_action"
         elif active_controlled_runs:
             state, label = "running", "▶ WB RUN"
             reason = f"{active_controlled_runs} WorkerBee controlled run(s) active"
             source = "workerbee_controlled_run"
             flow = "WB run"
+            precedence_reason = "active_workerbee_run"
         elif active_campaigns:
             state, label = "running", "▶ RUN"
             reason = f"{active_campaigns} active campaign(s)"
             source = "campaign"
+            subject_id = campaign_id
             flow = f"{active_campaigns} camp"
+            precedence_reason = (
+                "newer_active_campaign_superseded_terminal_report"
+                if report_superseded
+                else "active_campaign"
+            )
         elif bool(agent.get("status_stale")):
             state, label = "stale", "△ STALE"
             reason = "Operator status has not refreshed"
             if status:
                 reason = f"{reason}; latest report remains {status}"
             source = "agent_status"
+            precedence_reason = "stale_runtime_without_durable_work"
         elif status in {"running", "working", "starting", "executing"}:
             state, label = "running", "▶ RUN"
             reason = "Latest Operator report is active"
             source = "latest_report"
+            subject_id = report_id
+            precedence_reason = "latest_active_report"
         elif status in {"waiting", "needs_input", "plan", "planning"}:
             state, label = "waiting", "◈ WAIT"
             reason = "Operator is waiting"
             source = "latest_report"
+            subject_id = report_id
+            precedence_reason = "latest_waiting_report"
         elif status in {"done", "complete", "completed", "canceled", "cancelled"}:
             state, label = "done", "✓ DONE"
             reason = "Latest Operator work is terminal"
             source = "latest_report"
+            subject_id = report_id
+            precedence_reason = "latest_terminal_report"
         elif status in {"offline", "stopped", "disconnected"}:
             state, label = "offline", "○ OFF"
             reason = "Operator runtime is unavailable"
             source = "agent_status"
+            precedence_reason = "offline_runtime"
+
+        primary_at: float | None = None
+        if source == "latest_report" and report_at is not None:
+            primary_at = float(report_at)
+        elif source == "campaign" and campaign_at is not None:
+            primary_at = float(campaign_at)
+        elif source == "agent_status" and agent.get("last_seen_at") is not None:
+            primary_at = float(agent["last_seen_at"])
+
+        secondary_source: str | None = None
+        secondary_subject_id: str | None = None
+        secondary_at: float | None = None
+        if active_campaigns and source != "campaign":
+            secondary_source = "campaign"
+            secondary_subject_id = campaign_id
+            secondary_at = float(campaign_at) if campaign_at is not None else None
+            campaign_flow = f"{active_campaigns} camp"
+            flow = (
+                f"{flow} · {campaign_flow}"
+                if flow
+                else f"{campaign_flow} · {state}"
+            )
+        elif source == "campaign" and report_id is not None:
+            secondary_source = "latest_report"
+            secondary_subject_id = report_id
+            secondary_at = float(report_at) if report_at is not None else None
+            if report_superseded and status:
+                flow = f"{flow} · prior {status}"
         agent["workflow_state"] = state
         agent["workflow_label"] = label
         agent["workflow_reason"] = reason
         agent["workflow_source"] = source
         agent["workflow_subject_id"] = subject_id
         agent["workflow_flow"] = flow
+        agent["workflow_primary_at"] = primary_at
+        agent["workflow_secondary_source"] = secondary_source
+        agent["workflow_secondary_subject_id"] = secondary_subject_id
+        agent["workflow_secondary_at"] = secondary_at
+        agent["workflow_precedence_reason"] = precedence_reason
+        agent["workflow_report_superseded"] = report_superseded
 
     @staticmethod
     def _add_workerbee_controlled_run_summary(
