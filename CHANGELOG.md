@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+## v2.5.0rc3 - 2026-11-17
+
+### Fixed
+
+- Run the host-terminal watchdog from the production recorded TUI entrypoint,
+  not only the direct compatibility entrypoint. An orphan interactive client
+  now releases only its exact writer lease and terminates without stopping,
+  signaling, remapping, or restarting its managed Codex runtime.
+- Separate current Codex child availability from retained lifecycle history.
+  A child reported as `notLoaded`, idle, unavailable, or no longer refreshed
+  is rendered as stale instead of remaining in the active count because its
+  last known lifecycle state was thinking or executing.
+- Preserve Codex child nicknames and spawn depth in the bounded PBX runtime
+  projection so the right-pane topology can be correlated with Codex's native
+  `/subagents` surface by nickname plus abbreviated thread ID.
+- Refresh unchanged child availability in memory without appending redundant
+  runtime-journal events. If app-server observation stops, the freshness
+  window expires and the child fails closed to stale.
+
+### Security
+
+- Keep subagent display state observational: RC3 adds no child steering,
+  prompt-body capture, hidden-reasoning exposure, authority inference, custom
+  profile claim, model override, concurrency change, or automatic repair.
+- Preserve exact TUI host identity, writer-lease ownership, recursive-attach
+  protections, managed runtime identity, and all Git, WorkerBee, provider,
+  credential, publication, review-fork, and remote-client authority boundaries.
+
 ## v2.5.0rc2 - 2026-11-17
 
 ### Fixed
