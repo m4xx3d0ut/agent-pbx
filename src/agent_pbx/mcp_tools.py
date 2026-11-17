@@ -1405,6 +1405,7 @@ def build_mcp_server(
         fork_track_id: str | None = None,
         delivery: str = "auto",
         delivery_request_id: str | None = None,
+        delivery_topology: str | None = None,
     ) -> dict[str, Any]:
         """Send a tracked campaign follow-up to a caller agent."""
         return operator_delivery_call(
@@ -1418,6 +1419,7 @@ def build_mcp_server(
             fork_track_id=fork_track_id,
             delivery=delivery,
             delivery_request_id=delivery_request_id,
+            delivery_topology=delivery_topology,
         )
 
     @mcp.tool()

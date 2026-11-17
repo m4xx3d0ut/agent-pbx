@@ -86,6 +86,7 @@ FORK_READY_STATUSES = {"starting", "running", "ready"}
 DEFAULT_FORK_TRACK_ID = "default"
 DEFAULT_FORK_PURPOSE = "edit"
 DEFAULT_FORK_ACCESS_MODE = "edit"
+CAMPAIGN_DELIVERY_TOPOLOGIES = {"operator_fork", "direct_caller"}
 FORK_RESUME_IDENTITY_METADATA_KEYS = (
     "fork_codex_session_id",
     "codex_session_id",
@@ -4328,6 +4329,11 @@ class OperatorService:
             raise ValueError("campaign requires at least one assignment")
         for assignment in assignment_payloads:
             self._require_caller(str(assignment["target_agent_id"]))
+        if any(
+            assignment["delivery_topology"] == "direct_caller"
+            for assignment in assignment_payloads
+        ):
+            self._require_root_operator(operator_agent_id)
 
         campaign = self.store.create_operator_campaign(
             operator_agent_id=logical_operator_id,
@@ -4341,18 +4347,37 @@ class OperatorService:
                 campaign=campaign,
                 assignment=assignment,
             )
+            topology = str(
+                assignment.get("delivery_topology") or "operator_fork"
+            )
+            direct_delivery: dict[str, Any] | None = None
             try:
-                command = self._deliver(
-                    operator_agent_id=operator_agent_id,
-                    campaign_id=campaign["campaign_id"],
-                    target_agent_id=assignment["target_agent_id"],
-                    message=message,
-                    assignment_id=assignment["assignment_id"],
-                    delivery=delivery,
-                    source="operator_campaign_start",
-                    operator_fork_id=assignment.get("operator_fork_id"),
-                    fork_track_id=assignment.get("fork_track_id"),
-                )
+                if topology == "direct_caller":
+                    direct_delivery = self.deliver_direct_caller_message(
+                        operator_agent_id=operator_agent_id,
+                        target_caller_agent_id=assignment["target_agent_id"],
+                        message=message,
+                        purpose=f"Campaign assignment: {campaign['title']}",
+                        delivery=delivery,
+                        metadata={
+                            "campaign_id": campaign["campaign_id"],
+                            "assignment_id": assignment["assignment_id"],
+                            "delivery_topology": topology,
+                        },
+                    )
+                    command = direct_delivery["command"]
+                else:
+                    command = self._deliver(
+                        operator_agent_id=operator_agent_id,
+                        campaign_id=campaign["campaign_id"],
+                        target_agent_id=assignment["target_agent_id"],
+                        message=message,
+                        assignment_id=assignment["assignment_id"],
+                        delivery=delivery,
+                        source="operator_campaign_start",
+                        operator_fork_id=assignment.get("operator_fork_id"),
+                        fork_track_id=assignment.get("fork_track_id"),
+                    )
             except IdleTargetDeliveryError as exc:
                 self.store.update_operator_assignment(
                     assignment["assignment_id"],
@@ -4418,6 +4443,12 @@ class OperatorService:
                 detail={
                     "delivery_status": command["status"],
                     "delivery": delivery,
+                    "delivery_topology": topology,
+                    "direct_delivery_id": (
+                        direct_delivery["delivery"]["delivery_id"]
+                        if direct_delivery is not None
+                        else None
+                    ),
                     "operator_fork_id": command["payload"].get("operator_fork_id"),
                     "fork_agent_id": fork_agent_id,
                     "fork_track_id": command["payload"].get("fork_track_id"),
@@ -4448,6 +4479,7 @@ class OperatorService:
         fork_track_id: str | None = None,
         delivery: str = "auto",
         delivery_request_id: str | None = None,
+        delivery_topology: str | None = None,
     ) -> dict[str, Any]:
         operator = self._require_operator(operator_agent_id)
         campaign = self._require_campaign_for_operator(campaign_id, operator)
@@ -4456,18 +4488,41 @@ class OperatorService:
             target_agent_id=target_agent_id,
             assignment_id=assignment_id,
         )
-        command = self._deliver(
-            operator_agent_id=operator_agent_id,
-            campaign_id=campaign_id,
-            target_agent_id=target_agent_id,
-            message=message,
-            assignment_id=assignment["assignment_id"],
-            delivery=delivery,
-            source="operator_campaign_followup",
-            operator_fork_id=operator_fork_id or assignment.get("operator_fork_id"),
-            fork_track_id=fork_track_id or assignment.get("fork_track_id"),
-            delivery_request_id=delivery_request_id,
-        )
+        topology = str(assignment.get("delivery_topology") or "operator_fork")
+        requested_topology = str(delivery_topology or topology).strip().lower()
+        if requested_topology != topology:
+            raise ValueError("campaign follow-up cannot change assignment delivery topology")
+        direct_delivery: dict[str, Any] | None = None
+        if topology == "direct_caller":
+            if operator_fork_id or fork_track_id:
+                raise ValueError("direct_caller follow-up cannot target an operator fork")
+            direct_delivery = self.deliver_direct_caller_message(
+                operator_agent_id=operator_agent_id,
+                target_caller_agent_id=target_agent_id,
+                message=message,
+                purpose=f"Campaign follow-up: {campaign['title']}",
+                delivery=delivery,
+                metadata={
+                    "campaign_id": campaign_id,
+                    "assignment_id": assignment["assignment_id"],
+                    "delivery_topology": topology,
+                    "delivery_request_id": delivery_request_id,
+                },
+            )
+            command = direct_delivery["command"]
+        else:
+            command = self._deliver(
+                operator_agent_id=operator_agent_id,
+                campaign_id=campaign_id,
+                target_agent_id=target_agent_id,
+                message=message,
+                assignment_id=assignment["assignment_id"],
+                delivery=delivery,
+                source="operator_campaign_followup",
+                operator_fork_id=operator_fork_id or assignment.get("operator_fork_id"),
+                fork_track_id=fork_track_id or assignment.get("fork_track_id"),
+                delivery_request_id=delivery_request_id,
+            )
         state = "sent" if command["status"] == "sent" else "waiting"
         self._append_command_delivery_event(
             command,
@@ -4495,6 +4550,12 @@ class OperatorService:
             detail={
                 "delivery_status": command["status"],
                 "delivery": delivery,
+                "delivery_topology": topology,
+                "direct_delivery_id": (
+                    direct_delivery["delivery"]["delivery_id"]
+                    if direct_delivery is not None
+                    else None
+                ),
                 "operator_fork_id": command["payload"].get("operator_fork_id"),
                 "fork_agent_id": fork_agent_id,
                 "fork_track_id": command["payload"].get("fork_track_id"),
@@ -5027,6 +5088,19 @@ class OperatorService:
             raise ValueError("assignment criteria must be a list")
         operator_fork_id = str(data.get("operator_fork_id") or "").strip() or None
         fork_track_id = str(data.get("fork_track_id") or "").strip() or None
+        delivery_topology = str(
+            data.get("delivery_topology") or "operator_fork"
+        ).strip().lower()
+        if delivery_topology not in CAMPAIGN_DELIVERY_TOPOLOGIES:
+            raise ValueError(
+                "assignment delivery_topology must be operator_fork or direct_caller"
+            )
+        if delivery_topology == "direct_caller" and (
+            operator_fork_id or fork_track_id
+        ):
+            raise ValueError(
+                "direct_caller assignments cannot specify operator fork identifiers"
+            )
         return {
             "target_agent_id": target_agent_id,
             "operator_fork_id": operator_fork_id,
@@ -5038,6 +5112,7 @@ class OperatorService:
             "title": str(data.get("title") or f"Assignment for {target_agent_id}"),
             "prompt": prompt,
             "criteria": [str(item) for item in criteria],
+            "delivery_topology": delivery_topology,
         }
 
     def _deliver(

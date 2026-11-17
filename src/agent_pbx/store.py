@@ -35,7 +35,7 @@ from .persistence import (
 from .security import hash_secret, now_ts
 
 
-SCHEMA_VERSION = 45
+SCHEMA_VERSION = 46
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 POLL_BASE_TOKEN_ESTIMATE = 80
 DELIVERED_COMMAND_TOKEN_ESTIMATE = 120
@@ -3528,9 +3528,10 @@ class Store:
                     """
                     INSERT INTO operator_campaign_assignments
                         (assignment_id, campaign_id, target_agent_id, operator_fork_id,
-                         fork_track_id, title, prompt, criteria_json, state, last_report_id,
+                         fork_track_id, delivery_topology, title, prompt, criteria_json,
+                         state, last_report_id,
                          last_command_id, created_at, updated_at, completed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL)
                     """,
                     (
                         assignment_id,
@@ -3538,6 +3539,7 @@ class Store:
                         target_agent_id,
                         assignment.get("operator_fork_id"),
                         assignment.get("fork_track_id"),
+                        str(assignment.get("delivery_topology") or "operator_fork"),
                         assignment_title,
                         str(assignment["prompt"]),
                         json.dumps(assignment.get("criteria") or []),
@@ -3641,10 +3643,11 @@ class Store:
                     """
                     INSERT INTO operator_campaign_assignments(
                         assignment_id, campaign_id, target_agent_id,
-                        operator_fork_id, fork_track_id, title, prompt,
+                        operator_fork_id, fork_track_id, delivery_topology,
+                        title, prompt,
                         criteria_json, state, last_report_id, last_command_id,
                         created_at, updated_at, completed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL)
                     """,
                     (
                         assignment_id,
@@ -3652,6 +3655,7 @@ class Store:
                         assignment["target_agent_id"],
                         assignment["operator_fork_id"],
                         assignment["fork_track_id"],
+                        assignment["delivery_topology"],
                         assignment["title"],
                         assignment["prompt"],
                         assignment["criteria_json"],
@@ -3766,7 +3770,7 @@ class Store:
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         query = f"""
             SELECT assignment_id, campaign_id, target_agent_id, operator_fork_id,
-                   fork_track_id, title, prompt,
+                   fork_track_id, delivery_topology, title, prompt,
                    criteria_json, state, last_report_id, last_command_id,
                    created_at, updated_at, completed_at
             FROM operator_campaign_assignments
@@ -3787,7 +3791,7 @@ class Store:
             row = conn.execute(
                 """
                 SELECT assignment_id, campaign_id, target_agent_id, operator_fork_id,
-                       fork_track_id, title, prompt,
+                       fork_track_id, delivery_topology, title, prompt,
                        criteria_json, state, last_report_id, last_command_id,
                        created_at, updated_at, completed_at
                 FROM operator_campaign_assignments

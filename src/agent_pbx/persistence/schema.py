@@ -497,6 +497,7 @@ def initialize_schema(store: SchemaStore, *, schema_version: int) -> None:
                 target_agent_id TEXT NOT NULL,
                 operator_fork_id TEXT,
                 fork_track_id TEXT,
+                delivery_topology TEXT NOT NULL DEFAULT 'operator_fork',
                 title TEXT NOT NULL,
                 prompt TEXT NOT NULL,
                 criteria_json TEXT NOT NULL DEFAULT '[]',
@@ -1559,6 +1560,12 @@ def initialize_schema(store: SchemaStore, *, schema_version: int) -> None:
             "operator_campaign_assignments",
             "fork_track_id",
             "TEXT",
+        )
+        store._ensure_column(
+            conn,
+            "operator_campaign_assignments",
+            "delivery_topology",
+            "TEXT NOT NULL DEFAULT 'operator_fork'",
         )
         store._ensure_column(
             conn,

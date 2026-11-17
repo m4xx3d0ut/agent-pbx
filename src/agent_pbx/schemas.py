@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 AgentType = Literal["caller", "operator"]
 AgentPrunePreset = Literal["terminal-callers", "stale-callers", "operator-forks"]
 CampaignDelivery = Literal["auto", "queue", "tmux"]
+CampaignDeliveryTopology = Literal["operator_fork", "direct_caller"]
 CampaignStatus = Literal["running", "complete", "completed", "blocked", "failed", "canceled"]
 OperatorReviewEscalationRoute = Literal[
     "primary_idle_edit_fork",
@@ -583,6 +584,7 @@ class OperatorAssignmentCreate(BaseModel):
     title: str | None = Field(default=None, max_length=400)
     prompt: str = Field(min_length=1)
     criteria: list[str] = Field(default_factory=list)
+    delivery_topology: CampaignDeliveryTopology = "operator_fork"
 
 
 class OperatorCampaignStartRequest(BaseModel):
@@ -603,6 +605,7 @@ class OperatorFollowupRequest(BaseModel):
     assignment_id: str | None = Field(default=None, max_length=120)
     delivery: CampaignDelivery = "auto"
     delivery_request_id: str | None = Field(default=None, min_length=1, max_length=240)
+    delivery_topology: CampaignDeliveryTopology | None = None
 
 
 class OperatorAssignmentReportRequest(BaseModel):
@@ -1686,6 +1689,7 @@ class OperatorCampaignAssignmentResponse(BaseModel):
     target_agent_id: str
     operator_fork_id: str | None = None
     fork_track_id: str | None = None
+    delivery_topology: CampaignDeliveryTopology = "operator_fork"
     title: str
     prompt: str
     criteria: list[str]

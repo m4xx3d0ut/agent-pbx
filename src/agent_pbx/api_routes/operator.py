@@ -1701,6 +1701,7 @@ def register_operator_routes(app: FastAPI) -> None:
             fork_track_id=payload.fork_track_id,
             delivery=payload.delivery,
             delivery_request_id=payload.delivery_request_id,
+            delivery_topology=payload.delivery_topology,
         )
 
     @app.post(

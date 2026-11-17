@@ -3670,6 +3670,112 @@ def test_root_operator_direct_caller_delivery_queues_without_creating_fork(
     )
 
 
+def test_direct_caller_campaign_tracks_assignment_without_creating_fork(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    service = OperatorService(store)
+
+    campaign = service.start_campaign(
+        operator_agent_id="operator-0",
+        title="Existing caller review",
+        objective="Collect a bounded review from the existing caller.",
+        criteria=["receipt is campaign-correlated"],
+        assignments=[
+            {
+                "target_agent_id": "caller-1",
+                "prompt": "Review the evidence and report findings.",
+                "delivery_topology": "direct_caller",
+            }
+        ],
+        delivery="auto",
+    )
+
+    assignment = campaign["assignments"][0]
+    assert assignment["delivery_topology"] == "direct_caller"
+    assert assignment["operator_fork_id"] is None
+    command = store.get_command(assignment["last_command_id"])
+    assert command is not None
+    assert command["agent_id"] == "caller-1"
+    assert command["payload"]["source"] == "operator_direct_caller"
+    assert command["payload"]["metadata"]["campaign_id"] == campaign["campaign_id"]
+    assert command["payload"]["metadata"]["assignment_id"] == assignment["assignment_id"]
+    assert store.list_operator_forks(limit=100) == []
+    dispatch = next(
+        event
+        for event in campaign["events"]
+        if event["event_type"] == "assignment_dispatched"
+    )
+    assert dispatch["detail"]["delivery_topology"] == "direct_caller"
+    assert dispatch["detail"]["direct_delivery_id"]
+
+    followup = service.send_followup(
+        operator_agent_id="operator-0",
+        campaign_id=campaign["campaign_id"],
+        target_agent_id="caller-1",
+        assignment_id=assignment["assignment_id"],
+        message="Please include the exact package provenance.",
+        delivery="auto",
+    )
+    assert followup["agent_id"] == "caller-1"
+    assert followup["payload"]["metadata"]["campaign_id"] == campaign["campaign_id"]
+    assert store.list_operator_forks(limit=100) == []
+
+
+def test_direct_caller_campaign_rejects_fork_identity_and_non_root_operator(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    register_operator_and_caller(store, tmp_path)
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-0-fork-caller-1",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={
+                "operator_role": "fork",
+                "logical_operator_id": "operator-0",
+                "pbx_mode": "report",
+            },
+        )
+    )
+    service = OperatorService(store)
+
+    with pytest.raises(ValueError, match="cannot specify operator fork"):
+        service.start_campaign(
+            operator_agent_id="operator-0",
+            title="Invalid topology",
+            objective="Reject mixed identities.",
+            criteria=[],
+            assignments=[
+                {
+                    "target_agent_id": "caller-1",
+                    "operator_fork_id": "fork-id",
+                    "prompt": "Do not dispatch.",
+                    "delivery_topology": "direct_caller",
+                }
+            ],
+        )
+    with pytest.raises(ValueError, match="root operator"):
+        service.start_campaign(
+            operator_agent_id="operator-0-fork-caller-1",
+            title="Invalid source",
+            objective="Reject fork-authored direct delivery.",
+            criteria=[],
+            assignments=[
+                {
+                    "target_agent_id": "caller-1",
+                    "prompt": "Do not dispatch.",
+                    "delivery_topology": "direct_caller",
+                }
+            ],
+        )
+    assert store.list_operator_campaigns(limit=100) == []
+
+
 def test_direct_caller_delivery_rejects_operator_fork_and_non_nohup_queue(
     tmp_path: Path,
 ) -> None:
