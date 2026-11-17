@@ -284,8 +284,9 @@ class DemoTerminal:
             print("Agent PBX demo runtime requires a TTY", file=sys.stderr)
             return 2
         self.old_termios = termios.tcgetattr(sys.stdin.fileno())
-        tty.setcbreak(sys.stdin.fileno())
+        tty.setraw(sys.stdin.fileno())
         signal.signal(signal.SIGWINCH, lambda *_: self.draw())
+        signal.signal(signal.SIGINT, lambda *_: setattr(self, "input", ""))
         signal.signal(signal.SIGTERM, lambda *_: setattr(self, "running", False))
         try:
             self.draw()

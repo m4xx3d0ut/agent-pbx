@@ -201,6 +201,9 @@ def test_demo_session_starts_real_isolated_server_and_runtime() -> None:
         session.start()
         assert session.daemon_process is not None
         assert session.daemon_process.poll() is None
+        assert session.environment["PYTHONPATH"] == str(
+            Path(demo_session.__file__).resolve().parents[2]
+        )
         assert session.joplin_server is not None
         assert session.joplin_thread is not None
         assert session.joplin_thread.is_alive()
@@ -291,6 +294,21 @@ def test_demo_session_starts_real_isolated_server_and_runtime() -> None:
                 assert unique_input not in _capture_pane(
                     session, str(mapping["pane_id"])
                 )
+
+        interrupted_input = "operator-zero-interrupted-input"
+        _tmux(session, "send-keys", "-t", root_pane, "-l", interrupted_input)
+        _wait_for_pane_text(session, root_pane, interrupted_input)
+        _tmux(session, "send-keys", "-t", root_pane, "C-c")
+        time.sleep(0.3)
+        panes_after_interrupt = _tmux(
+            session,
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}",
+        ).stdout.splitlines()
+        assert root_pane in panes_after_interrupt
+        assert interrupted_input not in _capture_pane(session, root_pane)
 
         implicit_tmux = subprocess.run(
             [
