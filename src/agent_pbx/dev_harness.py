@@ -285,6 +285,7 @@ def harness_environment(plan: HarnessPlan) -> dict[str, str]:
         "XDG_CACHE_HOME": str(plan.paths.cache_home),
         "TMPDIR": str(plan.paths.temp_dir),
         "PATH": f"{plan.paths.bin_dir}{os.pathsep}{path}",
+        "PYTHONPATH": str(plan.source_root / "src"),
         "AGENT_PBX_HOME": str(plan.paths.state_root),
         "AGENT_PBX_DB": str(plan.paths.db_path),
         "AGENT_PBX_HOST": "127.0.0.1",

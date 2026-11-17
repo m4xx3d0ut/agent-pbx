@@ -109,6 +109,7 @@ def test_harness_environment_does_not_inherit_production_integration_paths(
     env = dev_harness.harness_environment(plan)
 
     assert env["HOME"] == str(plan.paths.home)
+    assert env["PYTHONPATH"] == str(plan.source_root / "src")
     assert env["AGENT_PBX_SERVER_URL"] == plan.server_url
     assert "AGENT_PBX_JOPLIN_PROFILE" not in env
     assert env["AGENT_PBX_RUNTIME_SERVER_MODE"] == "dedicated"
