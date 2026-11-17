@@ -14695,7 +14695,7 @@
   },
   "info": {
     "title": "Agent PBX",
-    "version": "2.4.0"
+    "version": "2.5.0rc1"
   },
   "openapi": "3.1.0",
   "paths": {
