@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+## v2.5.0rc4 - 2026-11-17
+
+### Added
+
+- Add preview-token-bound rehydration for an existing caller identity that has
+  no managed runtime mapping. The initial safe mode starts a fresh independent
+  Codex session in the caller's persisted project while preserving stars,
+  project ownership, durable history, and PBX identity; historical shared
+  sessions are evidence only and are never resumed implicitly.
+- Add an explicit `direct_caller` campaign-delivery topology for root Operators
+  that intentionally target an existing caller without creating an Operator
+  fork. The existing `operator_fork` topology remains the default and topology
+  cannot be switched by a follow-up.
+- Publish a deterministic manifest of the exact FastMCP tool contract and stamp
+  its digest into new managed/TUI Codex launches and durable runtime evidence.
+  Agent summaries now distinguish `current`, `stale`, `unknown`, `no_runtime`,
+  and `unavailable` inventories.
+
+### Changed
+
+- Advance the additive database contract from schema 45 to schema 46 for the
+  persisted campaign delivery topology. Existing assignments migrate to the
+  unchanged `operator_fork` behavior.
+- Project Operator `State`, `Flow`, and `Camp` from explicit primary and
+  secondary evidence, timestamps, subject IDs, and precedence reasons. A newer
+  active campaign can supersede an unrelated older terminal report without
+  deleting either durable record.
+- Reconcile campaigns after dispatch so all-terminal assignments close the
+  campaign instead of leaving a stale running projection; unresolved completion
+  receipts and other durable review boundaries continue to take precedence.
+- Mark a proven MCP manifest mismatch as restart-required. Pre-RC4 sessions
+  without launch provenance are reported as unknown with a restart
+  recommendation, never as a proven mismatch.
+
+### Security
+
+- Keep caller rehydration fail closed across existing runtime mappings,
+  conflicting tmux sessions, stale preview tokens, invalid project roots,
+  unsupported profiles, and unobserved Codex fork capability. Persistence
+  failure removes only the disposable newly created session.
+- Keep direct-caller campaigns root-Operator-only and retain exact-target,
+  runtime-readiness, writer-lease, workspace, and terminal-delivery checks.
+- Treat MCP inventory state as provenance rather than authority: it does not
+  grant tools, restart sessions automatically, mutate live mappings, or infer
+  that legacy sessions are stale without a recorded launch digest.
+
 ## v2.5.0rc3 - 2026-11-17
 
 ### Fixed
