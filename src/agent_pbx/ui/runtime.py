@@ -4,10 +4,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import signal
 import stat
 import sys
+import threading
+import time
 from typing import Any, Callable
+from urllib.parse import quote
 
+import httpx
 from rich.text import Text
 
 from ..contracts import CodexRuntimeState
@@ -76,6 +81,22 @@ class TuiHostTerminalIdentity:
 class TuiHostLiveness:
     live: bool
     reason_code: str
+
+
+TUI_HOST_WATCHDOG_SECONDS = 1.0
+TUI_HOST_TERMINATION_GRACE_SECONDS = 3.0
+SUBAGENT_ACTIVE_FRESHNESS_SECONDS = 30.0
+SUBAGENT_ACTIVE_STATES = frozenset(
+    {
+        CodexRuntimeState.STARTING,
+        CodexRuntimeState.THINKING,
+        CodexRuntimeState.DELEGATING,
+        CodexRuntimeState.EXECUTING,
+        CodexRuntimeState.WAITING_TOOL,
+        CodexRuntimeState.COMPACTING,
+        CodexRuntimeState.REVIEWING,
+    }
+)
 
 
 def capture_interactive_tui_host_identity(
@@ -259,6 +280,102 @@ def orphan_tui_host_diagnostics(reason_code: str) -> tuple[str, str]:
     )
 
 
+def release_orphan_tui_writer_lease(
+    app: Any,
+    *,
+    post: Callable[..., Any] = httpx.post,
+) -> bool:
+    """Release only the exact writer lease owned by an orphan TUI."""
+
+    agent_id = str(getattr(app, "embedded_terminal_agent_id", "") or "").strip()
+    client_id = str(getattr(app, "tmux_terminal_client_id", "") or "").strip()
+    server = str(getattr(app, "server", "") or "").rstrip("/")
+    if not agent_id or not client_id or not server:
+        return False
+    token = str(getattr(app, "token", "") or "")
+    try:
+        response = post(
+            f"{server}/v2/tmux/runtimes/{quote(agent_id, safe='')}/writer/release",
+            json={"client_id": client_id, "ttl_seconds": 30.0},
+            headers={"Authorization": f"Bearer {token}"} if token else {},
+            timeout=2.0,
+        )
+        return int(getattr(response, "status_code", 500)) in {200, 404, 409}
+    except Exception:
+        return False
+
+
+def watch_tui_host_liveness(
+    app: Any,
+    identity: TuiHostTerminalIdentity,
+    stop_event: threading.Event,
+    *,
+    assess: Callable[[TuiHostTerminalIdentity], TuiHostLiveness] = (
+        assess_tui_host_terminal_identity
+    ),
+    post: Callable[..., Any] = httpx.post,
+    terminate: Callable[[], None] = lambda: os.kill(os.getpid(), signal.SIGTERM),
+    hard_exit: Callable[[int], None] = os._exit,
+    check_seconds: float = TUI_HOST_WATCHDOG_SECONDS,
+    termination_grace_seconds: float = TUI_HOST_TERMINATION_GRACE_SECONDS,
+) -> None:
+    """Fail closed when Textual cannot observe its vanished host terminal."""
+
+    while not stop_event.wait(max(0.0, check_seconds)):
+        liveness = assess(identity)
+        if liveness.live:
+            continue
+        app.host_liveness_lost = True
+        release_orphan_tui_writer_lease(app, post=post)
+        terminate()
+        if not stop_event.wait(max(0.0, termination_grace_seconds)):
+            hard_exit(0)
+        return
+
+
+def finalize_tui_host_watchdog(
+    app: Any,
+    identity: TuiHostTerminalIdentity,
+    *,
+    assess: Callable[[TuiHostTerminalIdentity], TuiHostLiveness] = (
+        assess_tui_host_terminal_identity
+    ),
+    post: Callable[..., Any] = httpx.post,
+    hard_exit: Callable[[int], None] = os._exit,
+) -> bool:
+    """Prevent shutdown threads from preserving a TUI after host loss."""
+
+    if assess(identity).live:
+        return False
+    app.host_liveness_lost = True
+    release_orphan_tui_writer_lease(app, post=post)
+    hard_exit(0)
+    return True
+
+
+def run_tui_with_host_watchdog(app: Any) -> None:
+    """Run one TUI with a host watchdog independent of its event loop."""
+
+    identity = getattr(app, "host_terminal_identity", None)
+    if not isinstance(identity, TuiHostTerminalIdentity):
+        app.run()
+        return
+    stop_event = threading.Event()
+    watchdog = threading.Thread(
+        target=watch_tui_host_liveness,
+        args=(app, identity, stop_event),
+        daemon=True,
+        name="agent-pbx-tui-host-watchdog",
+    )
+    watchdog.start()
+    try:
+        app.run()
+    finally:
+        stop_event.set()
+        watchdog.join(timeout=0.1)
+        finalize_tui_host_watchdog(app, identity)
+
+
 def runtime_state(snapshot: Mapping[str, Any] | None) -> CodexRuntimeState:
     raw = str((snapshot or {}).get("state") or "unknown")
     try:
@@ -313,6 +430,7 @@ def runtime_topology(
     frame: int = 0,
     color_depth: int = 24,
     limit: int = 6,
+    now: float | None = None,
 ) -> Text:
     snapshot = snapshot or {}
     capabilities = snapshot.get("capabilities")
@@ -323,22 +441,28 @@ def runtime_topology(
         return Text()
     all_children = [item for item in raw_children if isinstance(item, Mapping)]
     terminal_states = {"complete", "error", "interrupted"}
-    active_count = sum(
-        1
-        for child in all_children
-        if str(child.get("state") or "") not in terminal_states
+    current = time.time() if now is None else now
+    done_count = sum(
+        1 for child in all_children if str(child.get("state") or "") in terminal_states
     )
-    done_count = len(all_children) - active_count
+    active_count = sum(
+        1 for child in all_children if child_is_confirmed_active(child, now=current)
+    )
+    stale_count = len(all_children) - active_count - done_count
     children = sorted(
         all_children,
         key=lambda child: (
+            child_display_rank(child, now=current),
+            -child_recent_timestamp(child),
             hierarchy_depth(child, all_children),
-            float(child.get("started_at") or 0.0),
             str(child.get("child_id") or ""),
         ),
     )[: max(1, limit)]
     text = Text(
-        f"SUBAGENTS {active_count} active · {done_count} done",
+        (
+            f"SUBAGENTS {active_count} active · {stale_count} stale · "
+            f"{done_count} done"
+        ),
         style=f"bold {PBX_PALETTE['muted']}",
     )
     text.append(
@@ -353,25 +477,100 @@ def runtime_topology(
         connector = ("  " * depth) + (
             "└─" if index == len(children) - 1 else "├─"
         )
-        label = single_line(child.get("role"), 28) or short_session(
-            single_line(child.get("child_id"), 240) or "child"
-        )
+        child_id = short_session(single_line(child.get("child_id"), 240) or "child")
+        nickname = single_line(child.get("nickname"), 28)
+        role = single_line(child.get("role"), 28)
+        identity = nickname or role
+        label = f"{identity} · {child_id}" if identity else child_id
         model = short_model(single_line(child.get("model"), 160) or "")
         effort = single_line(child.get("reasoning_effort"), 40)
         suffix = f" · {model}{'/' + effort.upper() if effort else ''}" if model else ""
+        state_label = child_display_state(child, now=current)
         text.append(f"\n{connector} ", style=PBX_PALETTE["muted"])
         text.append(symbol, style=f"bold {runtime_color(state, color_depth)}")
-        text.append(f" {label}  {STATE_LABELS[state]}{suffix}", style=PBX_PALETTE["foreground"])
+        text.append(f" {label}  {state_label}{suffix}", style=PBX_PALETTE["foreground"])
     extra = len(raw_children) - len(children)
     if extra > 0:
         text.append(f"\n└─ +{extra} more", style=PBX_PALETTE["muted"])
     return text
 
 
+def child_is_confirmed_active(
+    child: Mapping[str, Any],
+    *,
+    now: float,
+) -> bool:
+    if runtime_state(child) not in SUBAGENT_ACTIVE_STATES:
+        return False
+    availability = str(child.get("availability") or "").strip().casefold()
+    if availability and availability != "active":
+        return False
+    source = str(child.get("transition_source") or "").strip().casefold()
+    if not availability and source != "app_server":
+        return False
+    observed_at = child.get("availability_observed_at") or child.get(
+        "last_transition_at"
+    )
+    try:
+        age = max(0.0, now - float(observed_at))
+    except (TypeError, ValueError):
+        return False
+    return age <= SUBAGENT_ACTIVE_FRESHNESS_SECONDS
+
+
+def child_display_rank(child: Mapping[str, Any], *, now: float) -> int:
+    if child_is_confirmed_active(child, now=now):
+        return 0
+    if runtime_state(child) in {
+        CodexRuntimeState.COMPLETE,
+        CodexRuntimeState.ERROR,
+        CodexRuntimeState.INTERRUPTED,
+    }:
+        return 2
+    return 1
+
+
+def child_recent_timestamp(child: Mapping[str, Any]) -> float:
+    for key in (
+        "availability_observed_at",
+        "last_transition_at",
+        "finished_at",
+        "started_at",
+    ):
+        try:
+            return float(child.get(key) or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def child_display_state(child: Mapping[str, Any], *, now: float) -> str:
+    state = runtime_state(child)
+    if state in {
+        CodexRuntimeState.COMPLETE,
+        CodexRuntimeState.ERROR,
+        CodexRuntimeState.INTERRUPTED,
+    }:
+        return STATE_LABELS[state]
+    if child_is_confirmed_active(child, now=now):
+        return STATE_LABELS[state]
+    availability = str(child.get("availability") or "").strip().casefold()
+    if availability == "idle":
+        return "IDLE"
+    if availability == "unloaded":
+        return f"UNLOADED · last {STATE_LABELS[state]}"
+    if availability == "error":
+        return "DISCOVERY ERROR"
+    return f"STALE · last {STATE_LABELS[state]}"
+
+
 def hierarchy_depth(
     child: Mapping[str, Any],
     children: list[Mapping[str, Any]],
 ) -> int:
+    spawn_depth = child.get("spawn_depth")
+    if isinstance(spawn_depth, int):
+        return max(0, min(4, spawn_depth - 1))
     by_id = {
         str(item.get("child_id") or ""): item
         for item in children

@@ -522,10 +522,15 @@ def run_tui_recorded(*, server: str, token: str | None = None) -> None:
     """Launch the Textual client with fail-open durable run diagnostics."""
 
     from .tui import AgentPBXTUI
+    from .ui import runtime as ui_runtime
 
     with record_tui_run(server=server, token=token):
-        AgentPBXTUI(
-            server=server,
-            token=token,
-            v2_defaults=True,
-        ).run()
+        identity = ui_runtime.capture_interactive_tui_host_identity()
+        ui_runtime.run_tui_with_host_watchdog(
+            AgentPBXTUI(
+                server=server,
+                token=token,
+                v2_defaults=True,
+                host_terminal_identity=identity,
+            )
+        )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import subprocess
 import threading
@@ -226,6 +226,10 @@ class CodexRuntimeService:
         role: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        nickname: str | None = None,
+        spawn_depth: int | None = None,
+        availability: str | None = None,
+        availability_observed_at: float | None = None,
         started_at: float | None = None,
         finished_at: float | None = None,
         parent_thread_id: str | None = None,
@@ -288,6 +292,24 @@ class CodexRuntimeService:
                     if state is CodexRuntimeState.UNKNOWN and prior is not None
                     else "passive_thread_list"
                 ),
+                nickname=(
+                    clean_public_value(nickname, 120)
+                    or (prior.nickname if prior else None)
+                ),
+                spawn_depth=(
+                    spawn_depth
+                    if isinstance(spawn_depth, int) and 0 <= spawn_depth <= 32
+                    else (prior.spawn_depth if prior else None)
+                ),
+                availability=(
+                    clean_public_value(availability, 40)
+                    or (prior.availability if prior else None)
+                ),
+                availability_observed_at=(
+                    availability_observed_at
+                    if availability_observed_at is not None
+                    else current
+                ),
             )
             record.native_subagents_observed = True
             if not self._upsert_child(record, child):
@@ -298,6 +320,36 @@ class CodexRuntimeService:
                 method="thread/list:subagent",
                 observed_at=current,
             )
+
+    def touch_discovered_child(
+        self,
+        agent_id: str,
+        *,
+        thread_id: str,
+        child_id: str,
+        availability_observed_at: float,
+    ) -> bool:
+        """Refresh current discovery freshness without journaling a heartbeat."""
+
+        agent = self.store.get_agent(agent_id)
+        if agent is None:
+            return False
+        with self._lock:
+            record = self._record(agent)
+            if not record.adapter.association.bind_app_server(
+                thread_id,
+                source="passive_thread_list",
+            ):
+                return False
+            resolved_child_id = clean_public_value(child_id, 240)
+            prior = record.children.get(resolved_child_id or "")
+            if prior is None:
+                return False
+            record.children[prior.child_id] = replace(
+                prior,
+                availability_observed_at=availability_observed_at,
+            )
+            return True
 
     def observe_report(
         self,
@@ -869,7 +921,7 @@ def profile_dict(profile: CodexProfile | None) -> dict[str, Any] | None:
 
 
 def child_dict(child: CodexChildRuntime) -> dict[str, Any]:
-    return {
+    result = {
         "child_id": child.child_id,
         "parent_id": child.parent_id,
         "state": child.state.value,
@@ -882,6 +934,14 @@ def child_dict(child: CodexChildRuntime) -> dict[str, Any]:
         "last_transition_at": child.last_transition_at,
         "transition_source": child.transition_source,
     }
+    optional = {
+        "nickname": child.nickname,
+        "spawn_depth": child.spawn_depth,
+        "availability": child.availability,
+        "availability_observed_at": child.availability_observed_at,
+    }
+    result.update({key: value for key, value in optional.items() if value is not None})
+    return result
 
 
 def child_from_snapshot(raw: object) -> CodexChildRuntime | None:
@@ -909,6 +969,10 @@ def child_from_snapshot(raw: object) -> CodexChildRuntime | None:
         last_transition_at=safe_float(raw.get("last_transition_at")),
         transition_source=clean_public_value(raw.get("transition_source"), 80)
         or "hydrated_snapshot",
+        nickname=clean_public_value(raw.get("nickname"), 120),
+        spawn_depth=safe_bounded_int(raw.get("spawn_depth"), minimum=0, maximum=32),
+        availability=clean_public_value(raw.get("availability"), 40),
+        availability_observed_at=safe_float(raw.get("availability_observed_at")),
     )
 
 
@@ -933,6 +997,19 @@ def safe_nonnegative_int(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed >= 0 else None
+
+
+def safe_bounded_int(
+    value: object,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int | None:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if minimum <= parsed <= maximum else None
 
 
 def safe_float(value: object) -> float | None:

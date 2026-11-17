@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import stat
+import threading
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -13,10 +14,13 @@ from agent_pbx.codex.runtime import CodexRuntimeService
 from agent_pbx.config import ServerConfig
 from agent_pbx.contracts import CodexRuntimeState
 from agent_pbx.ui.runtime import (
+    TuiHostTerminalIdentity,
     assess_tui_host_terminal_identity,
     capture_interactive_tui_host_identity,
+    finalize_tui_host_watchdog,
     runtime_header,
     runtime_topology,
+    watch_tui_host_liveness,
 )
 from agent_pbx.ui.theme import (
     CYBERPUNK_PALETTE,
@@ -128,6 +132,125 @@ def test_host_terminal_identity_fails_closed_on_drift(
     )
     assert assessment.live is False
     assert assessment.reason_code == reason
+
+
+def test_host_watchdog_releases_exact_writer_and_terminates_orphan() -> None:
+    identity = capture_interactive_tui_host_identity(
+        stdin=FakeTerminalStream(interactive=True),
+        stdout=FakeTerminalStream(interactive=True),
+        getppid=lambda: 42,
+        fstat=lambda _fd: terminal_stat(),  # type: ignore[arg-type]
+        ttyname=lambda _fd: "/dev/pts/7",
+        tcgetpgrp=lambda _fd: 99,
+        process_start_reader=lambda _pid: 1234,
+    )
+    assert identity is not None
+    app = SimpleNamespace(
+        host_liveness_lost=False,
+        embedded_terminal_agent_id="agent/a",
+        tmux_terminal_client_id="tui-exact",
+        server="http://127.0.0.1:8765",
+        token="secret",
+    )
+    posts: list[tuple[str, dict[str, object]]] = []
+    terminated: list[bool] = []
+    hard_exits: list[int] = []
+    stopped = threading.Event()
+
+    def post(url: str, **kwargs: object) -> SimpleNamespace:
+        posts.append((url, kwargs))
+        return SimpleNamespace(status_code=200)
+
+    def terminate() -> None:
+        terminated.append(True)
+        stopped.set()
+
+    watch_tui_host_liveness(
+        app,
+        identity,
+        stopped,
+        assess=lambda _identity: SimpleNamespace(
+            live=False, reason_code="parent_changed"
+        ),
+        post=post,
+        terminate=terminate,
+        hard_exit=hard_exits.append,
+        check_seconds=0.0,
+        termination_grace_seconds=0.0,
+    )
+
+    assert app.host_liveness_lost is True
+    assert terminated == [True]
+    assert hard_exits == []
+    assert posts == [
+        (
+            "http://127.0.0.1:8765/v2/tmux/runtimes/agent%2Fa/writer/release",
+            {
+                "json": {"client_id": "tui-exact", "ttl_seconds": 30.0},
+                "headers": {"Authorization": "Bearer secret"},
+                "timeout": 2.0,
+            },
+        )
+    ]
+
+
+def test_host_watchdog_hard_exits_when_graceful_termination_stalls() -> None:
+    identity = TuiHostTerminalIdentity(0, "/dev/pts/7", 1, 2, 3, 42, 1234)
+    app = SimpleNamespace(
+        host_liveness_lost=False,
+        embedded_terminal_agent_id=None,
+        tmux_terminal_client_id="tui-exact",
+        server="http://127.0.0.1:8765",
+        token="secret",
+    )
+    terminated: list[bool] = []
+    hard_exits: list[int] = []
+
+    watch_tui_host_liveness(
+        app,
+        identity,
+        threading.Event(),
+        assess=lambda _identity: SimpleNamespace(
+            live=False, reason_code="host_terminal_unavailable"
+        ),
+        terminate=lambda: terminated.append(True),
+        hard_exit=hard_exits.append,
+        check_seconds=0.0,
+        termination_grace_seconds=0.0,
+    )
+
+    assert app.host_liveness_lost is True
+    assert terminated == [True]
+    assert hard_exits == [0]
+
+
+def test_host_watchdog_hard_exits_after_run_when_host_was_lost() -> None:
+    identity = TuiHostTerminalIdentity(0, "/dev/pts/7", 1, 2, 3, 42, 1234)
+    app = SimpleNamespace(
+        host_liveness_lost=False,
+        embedded_terminal_agent_id="agent-a",
+        tmux_terminal_client_id="tui-exact",
+        server="http://127.0.0.1:8765",
+        token="secret",
+    )
+    posts: list[str] = []
+    hard_exits: list[int] = []
+
+    assert finalize_tui_host_watchdog(
+        app,
+        identity,
+        assess=lambda _identity: SimpleNamespace(
+            live=False, reason_code="parent_changed"
+        ),
+        post=lambda url, **_kwargs: posts.append(url)
+        or SimpleNamespace(status_code=200),
+        hard_exit=hard_exits.append,
+    )
+    assert app.host_liveness_lost is True
+    assert posts == [
+        "http://127.0.0.1:8765/v2/tmux/runtimes/agent-a/writer/release"
+    ]
+    assert hard_exits == [0]
 
 
 def runtime_client(tmp_path: Path) -> tuple[TestClient, object]:
@@ -482,8 +605,64 @@ def test_runtime_presentation_requires_observed_child_capability() -> None:
     topology = runtime_topology(snapshot)
     assert "SUBAGENTS" in topology.plain
     assert "child-1" in topology.plain
-    assert "THINKING" in topology.plain
+    assert "STALE · last THINKING" in topology.plain
     assert "reasoning" not in topology.plain.lower()
+
+
+def test_runtime_topology_separates_current_availability_from_lifecycle() -> None:
+    snapshot = json.loads(
+        (Path(__file__).parent / "fixtures" / "codex_subagent_not_loaded_v1.json")
+        .read_text(encoding="utf-8")
+    )
+
+    topology = runtime_topology(snapshot, now=2_000.0)
+
+    assert "SUBAGENTS 0 active · 8 stale · 14 done" in topology.plain
+    assert "Descartes · stale-08" in topology.plain
+    assert "UNLOADED · last THINKING" in topology.plain
+    assert "done-14" not in topology.plain
+
+
+def test_runtime_topology_orders_confirmed_active_before_recent_stale_and_done() -> None:
+    snapshot = {
+        "capabilities": {"native_subagents": "observed"},
+        "children": [
+            {
+                "child_id": "done-child",
+                "state": "complete",
+                "nickname": "Done",
+                "finished_at": 1_995.0,
+                "availability": "unloaded",
+                "availability_observed_at": 1_995.0,
+            },
+            {
+                "child_id": "stale-child",
+                "state": "thinking",
+                "nickname": "Stale",
+                "last_transition_at": 1_990.0,
+                "availability": "unloaded",
+                "availability_observed_at": 1_999.0,
+            },
+            {
+                "child_id": "active-child",
+                "state": "executing",
+                "nickname": "Active",
+                "last_transition_at": 1_998.0,
+                "availability": "active",
+                "availability_observed_at": 1_999.0,
+            },
+        ],
+    }
+
+    topology = runtime_topology(snapshot, now=2_000.0)
+
+    assert "SUBAGENTS 1 active · 1 stale · 1 done" in topology.plain
+    assert topology.plain.index("Active · active-ch") < topology.plain.index(
+        "Stale · stale-ch"
+    )
+    assert topology.plain.index("Stale · stale-ch") < topology.plain.index(
+        "Done · done-chi"
+    )
 
 
 def test_accessible_theme_has_terminal_fallbacks_and_shared_generators() -> None:

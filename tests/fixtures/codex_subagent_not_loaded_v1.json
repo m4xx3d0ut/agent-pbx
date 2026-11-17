@@ -1,0 +1,29 @@
+{
+  "capabilities": {
+    "native_subagents": "observed"
+  },
+  "children": [
+    {"child_id":"stale-01","state":"thinking","nickname":"Ada","started_at":1001.0,"last_transition_at":1101.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1901.0},
+    {"child_id":"stale-02","state":"thinking","nickname":"Turing","started_at":1002.0,"last_transition_at":1102.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1902.0},
+    {"child_id":"stale-03","state":"thinking","nickname":"Lovelace","started_at":1003.0,"last_transition_at":1103.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1903.0},
+    {"child_id":"stale-04","state":"thinking","nickname":"Hopper","started_at":1004.0,"last_transition_at":1104.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1904.0},
+    {"child_id":"stale-05","state":"thinking","nickname":"Shannon","started_at":1005.0,"last_transition_at":1105.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1905.0},
+    {"child_id":"stale-06","state":"thinking","nickname":"Noether","started_at":1006.0,"last_transition_at":1106.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1906.0},
+    {"child_id":"stale-07","state":"thinking","nickname":"Curie","started_at":1007.0,"last_transition_at":1107.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1907.0},
+    {"child_id":"stale-08","state":"thinking","nickname":"Descartes","started_at":1008.0,"last_transition_at":1108.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1908.0},
+    {"child_id":"done-01","state":"complete","nickname":"Done 01","started_at":1201.0,"finished_at":1301.0,"last_transition_at":1301.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1801.0},
+    {"child_id":"done-02","state":"complete","nickname":"Done 02","started_at":1202.0,"finished_at":1302.0,"last_transition_at":1302.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1802.0},
+    {"child_id":"done-03","state":"complete","nickname":"Done 03","started_at":1203.0,"finished_at":1303.0,"last_transition_at":1303.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1803.0},
+    {"child_id":"done-04","state":"complete","nickname":"Done 04","started_at":1204.0,"finished_at":1304.0,"last_transition_at":1304.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1804.0},
+    {"child_id":"done-05","state":"complete","nickname":"Done 05","started_at":1205.0,"finished_at":1305.0,"last_transition_at":1305.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1805.0},
+    {"child_id":"done-06","state":"complete","nickname":"Done 06","started_at":1206.0,"finished_at":1306.0,"last_transition_at":1306.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1806.0},
+    {"child_id":"done-07","state":"complete","nickname":"Done 07","started_at":1207.0,"finished_at":1307.0,"last_transition_at":1307.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1807.0},
+    {"child_id":"done-08","state":"complete","nickname":"Done 08","started_at":1208.0,"finished_at":1308.0,"last_transition_at":1308.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1808.0},
+    {"child_id":"done-09","state":"complete","nickname":"Done 09","started_at":1209.0,"finished_at":1309.0,"last_transition_at":1309.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1809.0},
+    {"child_id":"done-10","state":"complete","nickname":"Done 10","started_at":1210.0,"finished_at":1310.0,"last_transition_at":1310.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1810.0},
+    {"child_id":"done-11","state":"complete","nickname":"Done 11","started_at":1211.0,"finished_at":1311.0,"last_transition_at":1311.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1811.0},
+    {"child_id":"done-12","state":"complete","nickname":"Done 12","started_at":1212.0,"finished_at":1312.0,"last_transition_at":1312.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1812.0},
+    {"child_id":"done-13","state":"complete","nickname":"Done 13","started_at":1213.0,"finished_at":1313.0,"last_transition_at":1313.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1813.0},
+    {"child_id":"done-14","state":"complete","nickname":"Done 14","started_at":1214.0,"finished_at":1314.0,"last_transition_at":1314.0,"transition_source":"passive_history","availability":"unloaded","availability_observed_at":1814.0}
+  ]
+}

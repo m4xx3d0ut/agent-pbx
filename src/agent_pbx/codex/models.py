@@ -30,6 +30,10 @@ class CodexChildRuntime:
     finished_at: float | None = None
     last_transition_at: float | None = None
     transition_source: str | None = None
+    nickname: str | None = None
+    spawn_depth: int | None = None
+    availability: str | None = None
+    availability_observed_at: float | None = None
 
 
 @dataclass(frozen=True)

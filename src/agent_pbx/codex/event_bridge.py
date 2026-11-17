@@ -36,6 +36,12 @@ CHILD_THREAD_STATES = {
     "notLoaded": CodexRuntimeState.UNKNOWN,
     "systemError": CodexRuntimeState.ERROR,
 }
+CHILD_THREAD_AVAILABILITY = {
+    "active": "active",
+    "idle": "idle",
+    "notLoaded": "unloaded",
+    "systemError": "error",
+}
 
 
 class AppServerBridgeError(RuntimeError):
@@ -658,8 +664,12 @@ class CodexAppServerEventBridge:
             source.get("agent_role"),
             120,
         )
+        nickname = public_text(source.get("agent_nickname"), 120)
+        spawn_depth = safe_bounded_int(source.get("depth"), minimum=0, maximum=32)
+        availability = CHILD_THREAD_AVAILABILITY.get(status_type or "", "unknown")
         started_at = safe_timestamp(row.get("createdAt"))
         observed_at = safe_timestamp(row.get("updatedAt")) or time.time()
+        discovered_at = time.time()
         fingerprint = child_fingerprint(
             "thread",
             target.agent_id,
@@ -667,6 +677,9 @@ class CodexAppServerEventBridge:
                 "child_id": child_id,
                 "state": state.value,
                 "role": role,
+                "nickname": nickname,
+                "spawn_depth": spawn_depth,
+                "availability": availability,
                 "model": public_text(row.get("model"), 160),
                 "reasoning_effort": public_text(row.get("reasoningEffort"), 80),
                 "started_at": started_at,
@@ -674,6 +687,13 @@ class CodexAppServerEventBridge:
             },
         )
         if not self._remember(fingerprint):
+            await asyncio.to_thread(
+                self.runtime.touch_discovered_child,
+                target.agent_id,
+                thread_id=target.thread_id,
+                child_id=child_id,
+                availability_observed_at=discovered_at,
+            )
             return
         await asyncio.to_thread(
             self.runtime.observe_discovered_child,
@@ -682,6 +702,10 @@ class CodexAppServerEventBridge:
             child_id=child_id,
             state=state,
             role=role,
+            nickname=nickname,
+            spawn_depth=spawn_depth,
+            availability=availability,
+            availability_observed_at=discovered_at,
             model=public_text(row.get("model"), 160),
             reasoning_effort=public_text(row.get("reasoningEffort"), 80),
             started_at=started_at,
@@ -906,6 +930,19 @@ def safe_timestamp(value: object) -> float | None:
 def safe_timestamp_ms(value: object) -> float | None:
     parsed = safe_timestamp(value)
     return parsed / 1000.0 if parsed is not None else None
+
+
+def safe_bounded_int(
+    value: object,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int | None:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if minimum <= parsed <= maximum else None
 
 
 def bridge_error_code(exc: BaseException) -> str:

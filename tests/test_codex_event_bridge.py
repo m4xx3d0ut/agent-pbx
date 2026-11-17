@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 import sys
@@ -82,6 +81,8 @@ def child_thread(
             "subAgent": {
                 "thread_spawn": {
                     "parent_thread_id": parent_id,
+                    "depth": 1,
+                    "agent_nickname": "Ptolemy",
                     "agent_role": "explorer",
                     "agent_path": "/private/agents/explorer.toml",
                 }
@@ -101,7 +102,13 @@ def child_thread(
 @pytest.mark.asyncio
 async def test_bridge_projects_exact_child_and_discards_private_fields(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    clock = {"now": 115.0}
+    monkeypatch.setattr(
+        "agent_pbx.codex.event_bridge.time.time",
+        lambda: clock["now"],
+    )
     store, runtime = registered_runtime(tmp_path)
     item = {
         "type": "subAgentActivity",
@@ -147,16 +154,34 @@ async def test_bridge_projects_exact_child_and_discards_private_fields(
             "finished_at": None,
             "last_transition_at": 110.0,
             "transition_source": "passive_thread_list",
+            "nickname": "Ptolemy",
+            "spawn_depth": 1,
+            "availability": "active",
+            "availability_observed_at": 115.0,
         }
     ]
     # Historical child hydration must not make an idle root look active.
     assert snapshot["state"] == "ready"
+    event_count = len(store.list_subject_events("agent-a"))
+    clock["now"] = 125.0
+    await bridge.reconcile_once(client)  # type: ignore[arg-type]
+    heartbeat = runtime.snapshot("agent-a")["children"][0]
+    assert heartbeat["availability_observed_at"] == 125.0
+    # An unchanged discovery heartbeat refreshes current availability in
+    # memory without appending a redundant runtime event.
+    assert len(store.list_subject_events("agent-a")) == event_count
     # A sidecar reports foreign live threads as notLoaded. A later metadata
     # update must not erase the lifecycle state already read from root items.
+    clock["now"] = 135.0
     client.threads[0]["status"] = {"type": "notLoaded"}
     client.threads[0]["updatedAt"] = 120.0
     await bridge.reconcile_once(client)  # type: ignore[arg-type]
-    assert runtime.snapshot("agent-a")["children"][0]["state"] == "thinking"
+    unloaded = runtime.snapshot("agent-a")["children"][0]
+    assert unloaded["state"] == "thinking"
+    assert unloaded["nickname"] == "Ptolemy"
+    assert unloaded["spawn_depth"] == 1
+    assert unloaded["availability"] == "unloaded"
+    assert unloaded["availability_observed_at"] == 135.0
     serialized = json.dumps(store.list_subject_events("agent-a"))
     for private_value in (
         "private child prompt",
@@ -171,9 +196,12 @@ async def test_bridge_projects_exact_child_and_discards_private_fields(
         "thread/items/list",
         "thread/list",
         "thread/items/list",
+        "thread/list",
+        "thread/items/list",
     ]
     assert client.calls[0][1]["ancestorThreadId"] == "thread-root"
     assert client.calls[2][1]["ancestorThreadId"] == "thread-root"
+    assert client.calls[4][1]["ancestorThreadId"] == "thread-root"
 
 
 @pytest.mark.asyncio

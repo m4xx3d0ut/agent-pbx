@@ -15654,9 +15654,6 @@ class AgentPBXTUI(App[None]):
             await self.load_tmux_capture(agent_id)
             return
         if self.embedded_terminal_surface() is None:
-            # State may change while the renewal request is in flight. Release
-            # the just-renewed lease instead of allowing the timer to resurrect
-            # a hidden or detached embedded client.
             await self.detach_embedded_tmux_terminal(release_lease=True)
 
     async def resolve_runtime_pop_client(
@@ -32943,9 +32940,11 @@ class AgentPBXTUI(App[None]):
 
 
 def run_tui(*, server: str, token: str | None = None) -> None:
-    AgentPBXTUI(
-        server=server,
-        token=token,
-        v2_defaults=True,
-        host_terminal_identity=ui_runtime.capture_interactive_tui_host_identity(),
-    ).run()
+    ui_runtime.run_tui_with_host_watchdog(
+        AgentPBXTUI(
+            server=server,
+            token=token,
+            v2_defaults=True,
+            host_terminal_identity=ui_runtime.capture_interactive_tui_host_identity(),
+        )
+    )
