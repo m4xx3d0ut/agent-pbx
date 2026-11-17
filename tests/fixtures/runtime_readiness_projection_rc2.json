@@ -1,0 +1,19 @@
+{
+  "schema": "agent-pbx.runtime-readiness-projection-fixture/v1",
+  "planning_report_id": "ac03d9bb-2c38-46ce-881e-46c66237d229",
+  "ledger_note_id": "3a03a4f648534a388f9c5ebca03c85c2",
+  "cases": {
+    "operator_0": {
+      "terminal_report_id": "0f2e23a0-ba17-438b-962c-e16385f9bd5c",
+      "rejected_delivery_id": "006f6bbb-bbf7-4e40-9fc2-cdd2bc96bfe6",
+      "readiness_report_id": "c6c5cdb8-8755-4e22-9ac4-09d1e9c84e0f",
+      "successful_delivery_id": "7508d471-1c16-41e4-b1ce-89ced3874d32"
+    },
+    "operator_6": {
+      "terminal_report_id": "bfefa9f1-49c6-4175-a230-cc3e2e4fd214",
+      "rejected_delivery_id": "b626862d-77d2-444c-bbcb-d936c0946b05",
+      "readiness_report_id": "162b89d0-b4fb-4870-8bd7-0eaf9d6bf5e0",
+      "successful_delivery_id": "6e9fc42c-bd51-4cac-aeaf-f945a6869aa8"
+    }
+  }
+}
