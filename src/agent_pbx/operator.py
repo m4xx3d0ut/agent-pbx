@@ -4455,6 +4455,9 @@ class OperatorService:
                 },
                 command_id=command["command_id"],
             )
+        self.store.reconcile_operator_campaign_terminal_state(
+            str(campaign["campaign_id"])
+        )
         self.store.append_event(
             "operator_campaign_started",
             {

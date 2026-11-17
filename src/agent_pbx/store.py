@@ -3890,6 +3890,83 @@ class Store:
             )
         return self.get_operator_campaign(campaign_id)
 
+    def reconcile_operator_campaign_terminal_state(
+        self,
+        campaign_id: str,
+    ) -> dict[str, Any] | None:
+        """Close a campaign when every assignment has a terminal projection."""
+
+        transition: dict[str, Any] | None = None
+        with self.connect() as conn:
+            begin_immediate(conn)
+            campaign = conn.execute(
+                """
+                SELECT campaign_id, operator_agent_id, status, completed_at
+                FROM operator_campaigns WHERE campaign_id = ?
+                """,
+                (campaign_id,),
+            ).fetchone()
+            if campaign is None:
+                return None
+            if campaign["completed_at"] is None:
+                rows = conn.execute(
+                    """
+                    SELECT assignment_id, state, completed_at
+                    FROM operator_campaign_assignments
+                    WHERE campaign_id = ? ORDER BY assignment_id
+                    """,
+                    (campaign_id,),
+                ).fetchall()
+                terminal = bool(rows) and all(
+                    row["completed_at"] is not None
+                    and _operator_terminal_projection_state(str(row["state"] or ""))
+                    is not None
+                    for row in rows
+                )
+                blockers = (
+                    self._operator_campaign_completion_blockers(conn, campaign_id)
+                    if terminal
+                    else []
+                )
+                if terminal and not blockers:
+                    status = _operator_campaign_projection_state(
+                        [str(row["state"] or "") for row in rows]
+                    )
+                    completed_at = max(float(row["completed_at"]) for row in rows)
+                    current = now_ts()
+                    cursor = conn.execute(
+                        """
+                        UPDATE operator_campaigns
+                        SET status = ?, summary = COALESCE(summary, ?),
+                            updated_at = ?, completed_at = ?
+                        WHERE campaign_id = ? AND completed_at IS NULL
+                        """,
+                        (
+                            status,
+                            f"All assignments reached terminal state: {status}",
+                            current,
+                            completed_at,
+                            campaign_id,
+                        ),
+                    )
+                    if cursor.rowcount:
+                        transition = {
+                            "campaign_id": campaign_id,
+                            "operator_agent_id": str(campaign["operator_agent_id"]),
+                            "status": status,
+                            "assignment_ids": [
+                                str(row["assignment_id"]) for row in rows
+                            ],
+                            "completed_at": completed_at,
+                        }
+        if transition is not None:
+            self.append_event(
+                "operator_campaign_terminal_state_reconciled",
+                transition,
+                campaign_id,
+            )
+        return self.get_operator_campaign(campaign_id)
+
     def add_operator_campaign_event(
         self,
         *,

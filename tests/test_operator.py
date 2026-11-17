@@ -3621,6 +3621,8 @@ def test_operator_campaign_tmux_delivery_rejects_drifted_fork_metadata(
     )
 
     assert sent == []
+    assert campaign["status"] == "blocked"
+    assert campaign["completed_at"] is not None
     assert campaign["assignments"][0]["state"] == "blocked"
     dispatch_failures = [
         event
