@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -83,6 +84,40 @@ def test_release_shell_scripts_are_syntactically_valid() -> None:
             text=True,
         )
         assert result.returncode == 0, result.stderr
+
+
+def test_full_suite_runner_pins_the_current_source_checkout(tmp_path: Path) -> None:
+    root = Path(__file__).parents[1]
+    trace = tmp_path / "pythonpath.log"
+    fake_python = tmp_path / "python"
+    fake_python.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$PYTHONPATH\" >> \"$TRACE_FILE\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    env = dict(os.environ)
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "PYTHONPATH": "/another/editable/checkout/src",
+            "TRACE_FILE": str(trace),
+        }
+    )
+
+    result = subprocess.run(
+        [str(root / "scripts" / "test_full.sh")],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    observed = trace.read_text(encoding="utf-8").splitlines()
+    assert observed == [
+        f"{root / 'src'}:/another/editable/checkout/src",
+        f"{root / 'src'}:/another/editable/checkout/src",
+    ]
 
 
 def test_release_python_scripts_compile() -> None:

@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+PYTHONPATH="$repo_root/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+
 python_bin=${PYTHON_BIN:-python}
 workers=${AGENT_PBX_TEST_WORKERS:-4}
 distribution=${AGENT_PBX_TEST_DIST:-worksteal}
