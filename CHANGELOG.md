@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## v2.5.0rc2 - 2026-11-17
+
+### Fixed
+
+- Separate immutable campaign/report projection from current Codex interaction
+  readiness. A terminal or `needs_input` report no longer vetoes delivery when
+  the exact managed runtime, process, workspace, idle composer, and writer lease
+  all remain valid.
+- Bind terminal-delivery receipts to the runtime mapping generation and include
+  bounded metadata-only readiness provenance. Current non-report interruption,
+  stale generation/session/process/workspace/authority evidence, overlays, and
+  writer conflicts continue to fail closed with stable reason codes.
+- Add isolated Operator-0 and Operator-6 regression fixtures for late reports,
+  restart replay, duplicate suppression, and terminal-history preservation
+  without using live managed panes or sockets.
+
+### Security
+
+- Keep report-mode delivery exact-target-only with no queue fallback, automatic
+  restart/remap, prompt suppression, review-fork broadening, or change to Git
+  broker, WorkerBee, provider, credential, publication, or remote-client
+  authority.
+- Keep prompt bodies and terminal captures out of delivery receipts and audit
+  records; readiness evidence contains only bounded state, source, timestamp,
+  reason, and target-identity metadata.
+
 ## v2.5.0rc1 - 2026-11-17
 
 ### Highlights
