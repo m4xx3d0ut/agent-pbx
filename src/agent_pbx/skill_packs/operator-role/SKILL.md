@@ -1,8 +1,8 @@
-<!-- agent-pbx-managed-skill:v2 start -->
 ---
 name: agent-pbx-operator-role
 description: Apply Agent PBX Operator campaign, routing, and handoff rules.
 ---
+<!-- agent-pbx-managed-skill:v2 start -->
 
 # Operator Role
 

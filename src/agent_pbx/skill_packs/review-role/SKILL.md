@@ -1,8 +1,8 @@
-<!-- agent-pbx-managed-skill:v2 start -->
 ---
 name: agent-pbx-review-role
 description: Apply read-only review fork constraints to roots and Codex children.
 ---
+<!-- agent-pbx-managed-skill:v2 start -->
 
 # Review Role
 

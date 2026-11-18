@@ -89,6 +89,18 @@ def test_skill_pack_apply_drift_and_rollback(tmp_path: Path) -> None:
     assert not target.exists()
 
 
+def test_managed_skill_sources_begin_with_valid_yaml_frontmatter() -> None:
+    service = ManagedSkillPackService(Path.cwd())
+
+    for name in service.pack_names:
+        body = service._source(name)
+        lines = body.splitlines()
+        assert lines[0] == "---"
+        assert "name:" in lines[1]
+        assert lines[3] == "---"
+        assert "<!-- agent-pbx-managed-skill:v2 start -->" in body
+
+
 def test_skill_pack_refuses_unmanaged_target_and_budget(tmp_path: Path) -> None:
     service = ManagedSkillPackService(tmp_path, pack_names=("agent-role",))
     target = tmp_path / ".codex/skills/agent-role/SKILL.md"

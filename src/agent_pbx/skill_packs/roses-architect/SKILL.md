@@ -1,8 +1,8 @@
-<!-- agent-pbx-managed-skill:v2 start -->
 ---
 name: roses-architect
 description: Apply the generic Roses Architect working profile and response contracts.
 ---
+<!-- agent-pbx-managed-skill:v2 start -->
 
 # Roses Architect
 

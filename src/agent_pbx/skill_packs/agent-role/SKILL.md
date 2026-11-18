@@ -1,8 +1,8 @@
-<!-- agent-pbx-managed-skill:v2 start -->
 ---
 name: agent-pbx-agent-role
 description: Apply caller Agent ownership and reporting rules.
 ---
+<!-- agent-pbx-managed-skill:v2 start -->
 
 # Agent Role
 

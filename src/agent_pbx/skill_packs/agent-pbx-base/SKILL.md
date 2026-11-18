@@ -1,8 +1,8 @@
-<!-- agent-pbx-managed-skill:v2 start -->
 ---
 name: agent-pbx-base
 description: Use Agent PBX as the durable identity, lifecycle, routing, and reporting control plane.
 ---
+<!-- agent-pbx-managed-skill:v2 start -->
 
 # Agent PBX Base
 
