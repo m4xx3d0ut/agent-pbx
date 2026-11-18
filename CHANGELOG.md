@@ -67,6 +67,9 @@
 
 ### Fixed
 
+- Preserve active TUI run markers on macOS and other hosts without Linux
+  process-start ticks by falling back to a non-signalling PID liveness probe;
+  stale markers are still reaped when the process is absent.
 - Deliver direct-caller campaign prompts through the same exact managed-runtime,
   process, session, workspace, input-readiness, and writer-lease contract used
   by Operator targets.

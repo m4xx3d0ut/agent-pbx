@@ -124,10 +124,32 @@ def _process_start_ticks(pid: int) -> int | None:
         return None
 
 
+def _process_pid_is_live(pid: int) -> bool:
+    """Return whether *pid* names a live process without signalling it.
+
+    Process start ticks are Linux-specific.  On hosts without ``/proc`` (most
+    notably macOS), a zero-signal probe is the conservative fallback used by
+    the TUI run recorder: an inaccessible process is still live, while an
+    absent process may be reaped as unclean evidence.
+    """
+
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def _process_identity_is_live(pid: int, start_ticks: int | None) -> bool:
     current = _process_start_ticks(pid)
     if current is None:
-        return False
+        return _process_pid_is_live(pid)
     return start_ticks is None or current == start_ticks
 
 

@@ -275,3 +275,73 @@ def test_tui_run_recorder_does_not_reap_another_live_client(tmp_path: Path) -> N
         event["event"] == "tui_unclean_exit_detected"
         for event in journal_events(tmp_path)
     )
+
+
+def test_tui_run_recorder_uses_pid_liveness_when_start_ticks_are_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = tmp_path / "active"
+    active.mkdir(parents=True)
+    live = active / f"{os.getpid()}-0-live.json"
+    live.write_text(
+        json.dumps(
+            {
+                "event": "tui_running",
+                "run_id": "live-run",
+                "pid": os.getpid(),
+                "process_start_ticks": None,
+                "started_at": 1.0,
+                "server_origin": "http://127.0.0.1:8765",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("agent_pbx.tui_runtime._process_start_ticks", lambda _pid: None)
+
+    recorder = TuiRunRecorder.start(
+        server="http://127.0.0.1:8765",
+        token=None,
+        root=tmp_path,
+    )
+    recorder.finish("clean")
+
+    assert live.exists()
+    assert not any(
+        event["event"] == "tui_unclean_exit_detected"
+        for event in journal_events(tmp_path)
+    )
+
+
+def test_tui_run_recorder_reaps_absent_pid_when_start_ticks_are_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = tmp_path / "active"
+    active.mkdir(parents=True)
+    stale = active / "999999-0-stale.json"
+    stale.write_text(
+        json.dumps(
+            {
+                "event": "tui_running",
+                "run_id": "stale-run",
+                "pid": 999999,
+                "process_start_ticks": None,
+                "started_at": 1.0,
+                "server_origin": "http://127.0.0.1:8765",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("agent_pbx.tui_runtime._process_start_ticks", lambda _pid: None)
+    monkeypatch.setattr("agent_pbx.tui_runtime._process_pid_is_live", lambda _pid: False)
+
+    recorder = TuiRunRecorder.start(
+        server="http://127.0.0.1:8765",
+        token=None,
+        root=tmp_path,
+    )
+    recorder.finish("clean")
+
+    assert not stale.exists()
+    assert (tmp_path / "unclean" / stale.name).exists()
