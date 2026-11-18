@@ -44,6 +44,10 @@ WIKI_REVIEW_DATE_RE = re.compile(
     r"^> \*\*Last reviewed:\*\* \d{4}-\d{2}-\d{2}$",
     re.MULTILINE,
 )
+WIKI_APPLICABILITY_RE = re.compile(
+    r"^> \*\*Applies to:\*\* Agent PBX 2\.\d+\.x(?: and later)?$",
+    re.MULTILINE,
+)
 
 
 @dataclass(frozen=True)
@@ -94,7 +98,7 @@ def validate_wiki() -> list[str]:
     for page in pages:
         body = page.read_text(encoding="utf-8")
         relative = page.relative_to(ROOT)
-        if "**Applies to:** Agent PBX 2.3.x" not in body:
+        if WIKI_APPLICABILITY_RE.search(body) is None:
             errors.append(f"{relative}: missing version applicability marker")
         if WIKI_REVIEW_DATE_RE.search(body) is None:
             errors.append(f"{relative}: missing review-date marker")

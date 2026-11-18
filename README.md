@@ -830,7 +830,7 @@ panes. `agent-pbx uat compare --run A --run B` reads persisted manifests and
 reports check, failure, warning, duration, cleanup, and report-drift deltas.
 
 The `codex-operator-flow` matrix is a live-operator checklist for Codex CLI and
-model compatibility. For the 0.158.0 update, run it with the selected GPT-5.6
+model compatibility. For the 0.169.0 baseline, run it with the selected Sol 6.2
 slug and use the cases to exercise caller-to-root operator spawn, default/edit
 fork launch, review fork transcript continuation, review fork fresh-context
 fallback, resume/restart session rebinding, native plan selector choices,
