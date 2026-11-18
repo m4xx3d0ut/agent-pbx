@@ -4,6 +4,7 @@ import threading
 
 import pytest
 
+from agent_pbx.controller_metadata import controller_metadata_patch
 from agent_pbx.mcp_inventory import (
     MCP_TOOL_MANIFEST_METADATA_KEY,
     MCP_TOOL_MANIFEST_STORE_KEY,
@@ -476,10 +477,12 @@ def test_controller_metadata_merge_can_clear_transition_fields(tmp_path: Path) -
 
     agent = store.merge_agent_metadata(
         "agent-1",
-        {"workerbee_workspace_binding_id": "new-binding"},
-        clear_metadata_keys=(
-            "workerbee_workspace_scenario",
-            "workerbee_workspace_previous_binding_id",
+        controller_metadata_patch(
+            {"workerbee_workspace_binding_id": "new-binding"},
+            clear_keys=(
+                "workerbee_workspace_scenario",
+                "workerbee_workspace_previous_binding_id",
+            ),
         ),
     )
 

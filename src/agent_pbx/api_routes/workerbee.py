@@ -35,9 +35,8 @@ from ..schemas import (
 )
 from ..workerbee import agent_cwd
 from ..workerbee_application import (
-    WORKERBEE_BINDING_TRANSITION_METADATA_KEYS,
     WorkerBeeApplicationService,
-    workerbee_binding_projection,
+    finalize_issued_workerbee_lease,
 )
 from ..workerbee_access import WorkerBeeAccessPolicyError
 from ..workerbee_controlled_run import WorkerBeeControlledRunError
@@ -1193,68 +1192,22 @@ def register_workerbee_routes(
             WorkerBeeWorkspacePolicyError,
         ) as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
+        binding = None
         if agent is not None:
             binding = await asyncio.to_thread(
                 request.app.state.workerbee_workspaces.load,
                 lease.workspace_binding_id,
             )
-            projection = workerbee_binding_projection(lease, binding)
-            projection["workerbee_mcp_profile"] = lease.profile
-            updated = await asyncio.to_thread(
-                store.merge_agent_metadata,
-                agent_id,
-                projection,
-                clear_metadata_keys=WORKERBEE_BINDING_TRANSITION_METADATA_KEYS,
-                event_type="workerbee_gateway_lease_issued",
-                event_payload={
-                    "agent_id": agent_id,
-                    "lease_id": lease.lease_id,
-                    "workspace_binding_id": lease.workspace_binding_id,
-                    "backend": lease.backend,
-                    "backend_generation": lease.backend_generation,
-                    "profile": lease.profile,
-                    "path_domain_receipt_sha256": (binding.path_domain.receipt_sha256),
-                    "workspace_policy_digest": (
-                        binding.path_domain.workspace_policy_digest
-                    ),
-                },
-            )
-            if updated is None:
-                await asyncio.to_thread(
-                    request.app.state.workerbee_gateway.revoke,
-                    lease.lease_id,
-                )
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "code": "WORKERBEE_ACCESS_AGENT_NOT_FOUND",
-                        "message": "Agent disappeared while persisting its WorkerBee lease.",
-                        "remediation": "Register the Agent and prepare a fresh lease.",
-                    },
-                )
+        try:
             await asyncio.to_thread(
-                store.merge_operator_fork_metadata,
-                agent_id,
-                projection,
-                clear_metadata_keys=WORKERBEE_BINDING_TRANSITION_METADATA_KEYS,
+                finalize_issued_workerbee_lease,
+                store,
+                request.app.state.workerbee_gateway,
+                lease,
+                binding,
             )
-        revoked = await asyncio.to_thread(
-            request.app.state.workerbee_gateway.revoke_superseded_for_agent,
-            agent_id,
-            keep_lease_id=lease.lease_id,
-        )
-        if revoked:
-            await asyncio.to_thread(
-                store.append_event,
-                "workerbee_gateway_predecessors_revoked",
-                {
-                    "agent_id": agent_id,
-                    "current_lease_id": lease.lease_id,
-                    "revoked_lease_ids": [item.lease_id for item in revoked],
-                    "revoked_count": len(revoked),
-                },
-                agent_id,
-            )
+        except WorkerBeeGatewayError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
         gateway_url = (
             str(request.base_url).rstrip("/") + f"/workerbee-mcp/{lease.lease_id}"
         )

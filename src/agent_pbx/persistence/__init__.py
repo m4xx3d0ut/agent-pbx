@@ -1,6 +1,7 @@
 """SQLite persistence infrastructure behind the public Store facade."""
 
 from .connection import SQLiteConnectionFactory
+from .schema import initialize_schema
 from .repositories import (
     AgentRepository,
     DurableHelperRepository,
@@ -28,4 +29,5 @@ __all__ = [
     "TerminalEditorRepository",
     "SQLiteConnectionFactory",
     "begin_immediate",
+    "initialize_schema",
 ]

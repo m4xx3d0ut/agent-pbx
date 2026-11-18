@@ -366,7 +366,6 @@ class WorkerBeeDevelopmentProvider:
         if digest != unsigned_digest(result, "capability_sha256"):
             raise DynamicResourceError("WorkerBee capability digest mismatch")
         return result
-
     @staticmethod
     def _require_capability_link(
         request: Mapping[str, Any],
@@ -541,3 +540,16 @@ class WorkerBeeDevelopmentProvider:
         ):
             raise DynamicResourceError("WorkerBee cleanup receipt digest mismatch")
         return result
+
+
+def workerbee_development_resource_providers(
+    *,
+    enabled: bool,
+    adapter: WorkerBeeDevelopmentAdapter | None,
+) -> dict[str, WorkerBeeDevelopmentProvider]:
+    """Build the optional private development-resource provider registry."""
+
+    if not enabled or adapter is None:
+        return {}
+    provider = WorkerBeeDevelopmentProvider(adapter)
+    return {provider.provider_id: provider}

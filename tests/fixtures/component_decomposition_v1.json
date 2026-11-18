@@ -36,12 +36,12 @@
       "lines": 1887
     },
     "src/agent_pbx/api_routes/workerbee.py": {
-      "ast_nodes": 6337,
-      "bytes": 55825,
+      "ast_nodes": 6251,
+      "bytes": 54148,
       "classes": 0,
       "functions": 40,
       "imports": 17,
-      "lines": 1339
+      "lines": 1310
     },
     "src/agent_pbx/persistence/schema.py": {
       "ast_nodes": 733,
@@ -100,12 +100,12 @@
       "lines": 1091
     },
     "src/agent_pbx/workerbee_application.py": {
-      "ast_nodes": 2378,
-      "bytes": 19336,
-      "classes": 2,
-      "functions": 12,
+      "ast_nodes": 1839,
+      "bytes": 13710,
+      "classes": 1,
+      "functions": 8,
       "imports": 16,
-      "lines": 482
+      "lines": 347
     }
   },
   "ownership_rules": {

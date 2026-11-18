@@ -27922,7 +27922,7 @@ def test_tui_review_operator_mcp_config_overrides_allowlist_known_tools() -> Non
     assert 'url = "http://127.0.0.1:8765/mcp"' in workerbee_config
     assert 'default_tools_approval_mode = "approve"' in workerbee_config
     assert "workerbee_v1_capabilities" in workerbee_config
-    assert "workerbee_v1_session_start" in workerbee_config
+    assert "workerbee_v1_session_start" not in workerbee_config
     assert "workerbee_v1_project_status" in workerbee_config
     assert "workerbee_v1_logs" in workerbee_config
     assert "workerbee_v1_workload_restart" not in workerbee_config
@@ -28835,7 +28835,7 @@ def test_tui_operator_gateway_binding_uses_exact_local_deploy_surface() -> None:
     assert "workerbee_v1_manifest_deploy_local" in operator_config
     assert "workerbee_v1_ingress_route_apply" in operator_config
     assert "workerbee_v1_exec" not in operator_config
-    assert "workerbee_v1_session_start" in review_config
+    assert "workerbee_v1_session_start" not in review_config
     assert "workerbee_v1_image_build" not in review_config
     assert "workerbee_v1_manifest_deploy_local" not in review_config
 
