@@ -146,7 +146,6 @@ from .workerbee_profile import (
     build_workerbee_profile_intent,
     configured_operator_workerbee_profile,
     has_explicit_workerbee_profile,
-    resolve_workerbee_profile_intent,
 )
 from .contracts import ActionDefinition
 from .terminal import (
@@ -197,6 +196,7 @@ from .ui.controllers import (
     OperatorHandoffController,
     PromptReferenceController,
     WorkerBeeController,
+    WorkerBeeLifecycleController,
     WorkerBeeProjectionController,
     controller_method,
     CALLER_AGENT_REF_PREFIX,
@@ -4585,6 +4585,7 @@ class AgentPBXTUI(App[None]):
         self._campaign_controller = CampaignController(self)
         self._operator_handoff_controller = OperatorHandoffController(self)
         self._workerbee_controller = WorkerBeeController(self)
+        self._workerbee_lifecycle_controller = WorkerBeeLifecycleController(self)
         self._joplin_controller = JoplinController(self)
         self._prompt_reference_controller = PromptReferenceController(self)
         self._github_controller = GitHubController(self)
@@ -18753,6 +18754,14 @@ class AgentPBXTUI(App[None]):
         if not isinstance(agent, dict):
             self.notify(f"{agent_id} is not loaded.", severity="warning")
             return False
+        resolved_workerbee = await self.workerbee_profile_for_lifecycle_agent(
+            agent_id,
+            agent,
+            action="restart",
+        )
+        if resolved_workerbee is None:
+            return False
+        agent, workerbee_profile = resolved_workerbee
         metadata = self.agent_metadata(agent)
         effective_model_preset = self.restart_model_preset(metadata, model_preset)
         session_id = str(
@@ -18784,7 +18793,6 @@ class AgentPBXTUI(App[None]):
         ):
             return False
         mcp_url = agent_pbx_mcp_url(self.server)
-        workerbee_profile = self.workerbee_profile_for_agent(agent)
         try:
             workerbee_gateway_binding = await self.prepare_workerbee_gateway_launch(
                 agent_id=agent_id,
@@ -21516,19 +21524,6 @@ class AgentPBXTUI(App[None]):
                 workspace["binding_id"]
             )
 
-    def workerbee_profile_for_agent(
-        self,
-        agent: Mapping[str, Any],
-    ) -> str:
-        metadata = {
-            **self.agent_metadata(agent),
-            "agent_type": self.agent_type(agent),
-        }
-        return resolve_workerbee_profile_intent(
-            str(agent.get("agent_id") or agent.get("id") or "unknown"),
-            metadata,
-        ).profile
-
     def workerbee_profile_metadata(
         self,
         agent_id: str,
@@ -23858,6 +23853,16 @@ class AgentPBXTUI(App[None]):
         self.notify(f"Retried completion delivery {delivery_id}.")
 
     fetch_workerbee_controlled_runs = controller_method("_workerbee_controller", "fetch_workerbee_controlled_runs")
+
+    workerbee_profile_for_agent = controller_method(
+        "_workerbee_lifecycle_controller",
+        "workerbee_profile_for_agent",
+    )
+
+    workerbee_profile_for_lifecycle_agent = controller_method(
+        "_workerbee_lifecycle_controller",
+        "workerbee_profile_for_lifecycle_agent",
+    )
 
     open_workerbee_controlled_run_center = controller_method("_workerbee_controller", "open_workerbee_controlled_run_center")
 

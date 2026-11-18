@@ -73,6 +73,7 @@ from agent_pbx.tui import (
     TMUX_LIVENESS_IDLE_SECONDS,
     TmuxLiveness,
     WorkerBeeLaunchPreflightError,
+    WorkerBeeProfileIntentError,
     WorkerBeeAccessScreen,
     WorkerBeeSwitchConfirmScreen,
     WorkerBeeControlledRunLeaseScreen,
@@ -28839,6 +28840,72 @@ def test_tui_review_fork_cannot_resolve_trusted_workerbee_profile() -> None:
 
     with pytest.raises(ValueError, match="missing its durable|review-readonly"):
         app.workerbee_profile_for_agent(agent)
+
+
+@pytest.mark.asyncio
+async def test_tui_lifecycle_workerbee_profile_refreshes_stale_cached_intent() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    stale = {"agent_id": "agent-1", "metadata": {"generation": "stale"}}
+    fresh = {"agent_id": "agent-1", "metadata": {"generation": "fresh"}}
+    app.agents = {"agent-1": stale}
+    refreshes: list[str] = []
+
+    def resolve(agent: dict[str, object]) -> str:
+        if agent is stale:
+            raise WorkerBeeProfileIntentError("stale authority")
+        assert agent is fresh
+        return "local-deploy"
+
+    async def refresh() -> None:
+        refreshes.append("refresh")
+        app.agents["agent-1"] = fresh
+
+    app.workerbee_profile_for_agent = resolve  # type: ignore[method-assign]
+    app.refresh_agents = refresh  # type: ignore[method-assign]
+
+    resolved = await app.workerbee_profile_for_lifecycle_agent(
+        "agent-1",
+        stale,
+        action="restart",
+    )
+
+    assert resolved == (fresh, "local-deploy")
+    assert refreshes == ["refresh"]
+
+
+@pytest.mark.asyncio
+async def test_tui_lifecycle_workerbee_profile_fails_safe_after_refresh() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    agent = {"agent_id": "agent-1", "metadata": {}}
+    app.agents = {"agent-1": agent}
+    notifications: list[tuple[str, str]] = []
+
+    def reject(_agent: dict[str, object]) -> str:
+        raise WorkerBeeProfileIntentError("authority mismatch")
+
+    async def refresh() -> None:
+        return None
+
+    app.workerbee_profile_for_agent = reject  # type: ignore[method-assign]
+    app.refresh_agents = refresh  # type: ignore[method-assign]
+    app.notify = lambda message, *, severity="information", **_kwargs: notifications.append(  # type: ignore[method-assign]
+        (str(message), severity)
+    )
+
+    resolved = await app.workerbee_profile_for_lifecycle_agent(
+        "agent-1",
+        agent,
+        action="restart",
+    )
+
+    assert resolved is None
+    assert notifications == [
+        (
+            "Unable to restart agent-1: WorkerBee authority still requires "
+            "policy reconciliation after refresh (authority mismatch).",
+            "error",
+        )
+    ]
 
 
 def test_tui_operator_gateway_binding_uses_exact_local_deploy_surface() -> None:
