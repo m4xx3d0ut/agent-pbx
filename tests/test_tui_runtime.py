@@ -176,6 +176,37 @@ def test_recorded_tui_rejects_noninteractive_launch(
         run_tui_recorded(server="http://127.0.0.1:8765", token="secret")
 
 
+def test_recorded_tui_allows_explicit_managed_stdio_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched: list[object] = []
+
+    class FakeApp:
+        def __init__(self, **kwargs: object) -> None:
+            self.host_terminal_identity = kwargs["host_terminal_identity"]
+
+    monkeypatch.setenv(TUI_RUNTIME_ROOT_ENV, str(tmp_path))
+    monkeypatch.setattr("agent_pbx.tui.AgentPBXTUI", FakeApp)
+    monkeypatch.setattr(
+        "agent_pbx.ui.runtime.capture_interactive_tui_host_identity",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "agent_pbx.ui.runtime.run_tui_with_host_watchdog",
+        launched.append,
+    )
+
+    run_tui_recorded(
+        server="http://127.0.0.1:8765",
+        token="secret",
+        allow_managed_stdio=True,
+    )
+
+    assert len(launched) == 1
+    assert launched[0].host_terminal_identity is None
+
+
 def test_tui_run_recorder_preserves_stale_marker_as_unclean_evidence(
     tmp_path: Path,
 ) -> None:

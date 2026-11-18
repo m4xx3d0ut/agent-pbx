@@ -573,7 +573,12 @@ def record_tui_run(*, server: str, token: str | None) -> Iterator[TuiRunRecorder
         recorder.finish("clean")
 
 
-def run_tui_recorded(*, server: str, token: str | None = None) -> None:
+def run_tui_recorded(
+    *,
+    server: str,
+    token: str | None = None,
+    allow_managed_stdio: bool = False,
+) -> None:
     """Launch the Textual client with fail-open durable run diagnostics."""
 
     from .tui import AgentPBXTUI
@@ -581,7 +586,7 @@ def run_tui_recorded(*, server: str, token: str | None = None) -> None:
 
     with record_tui_run(server=server, token=token):
         identity = ui_runtime.capture_interactive_tui_host_identity()
-        if identity is None:
+        if identity is None and not allow_managed_stdio:
             raise RuntimeError(
                 "Agent PBX TUI requires an attached interactive terminal; "
                 "refusing an orphanable background launch"

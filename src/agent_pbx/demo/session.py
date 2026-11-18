@@ -847,7 +847,11 @@ class DemoSession:
         os.environ.clear()
         os.environ.update(environment)
         try:
-            run_tui_recorded(server=self.server_url, token=self.token)
+            run_tui_recorded(
+                server=self.server_url,
+                token=self.token,
+                allow_managed_stdio=True,
+            )
         finally:
             self._stop_event.set()
             signal.signal(signal.SIGTERM, previous_term)
