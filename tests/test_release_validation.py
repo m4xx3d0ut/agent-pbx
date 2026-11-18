@@ -292,6 +292,8 @@ def test_production_workflow_has_narrow_trusted_publishing_boundary() -> None:
     assert "user:" not in workflow
     assert "name: github-release-assets" in workflow
     assert "Retain exact GitHub release assets for recovery" in workflow
+    assert 'gh release upload "$RELEASE_TAG"' in workflow
+    assert '--repo "$GITHUB_REPOSITORY"' in workflow
 
 
 def test_release_recovery_workflow_cannot_publish_to_pypi() -> None:
@@ -312,6 +314,8 @@ def test_release_recovery_workflow_cannot_publish_to_pypi() -> None:
     assert workflow.count("run-id: ${{ inputs.source_run_id }}") == 3
     assert "Verify PyPI hashes and clean installation" in workflow
     assert "--clobber" in workflow
+    assert 'gh release upload "$RELEASE_TAG"' in workflow
+    assert '--repo "$GITHUB_REPOSITORY"' in workflow
 
 
 def test_testpypi_workflow_is_manual_tag_only_and_cannot_select_production() -> None:

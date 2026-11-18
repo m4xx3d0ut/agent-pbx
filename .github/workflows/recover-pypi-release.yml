@@ -145,6 +145,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: >-
           gh release upload "$RELEASE_TAG"
+          --repo "$GITHUB_REPOSITORY"
           release-assets/agent-pbx-wheelhouse.tar.gz
           release-assets/agent-pbx-wheelhouse.tar.gz.sha256
           release-assets/install-agent-pbx.sh
