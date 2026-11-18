@@ -285,22 +285,35 @@ def classify_codex_model_selection(
     )
     catalog_models = {item.slug: item for item in catalog}
     catalog_model = catalog_models.get(model_slug)
-    if exact_profile is not None:
-        classification = CodexModelSelectionClass.MANAGED_QUALIFIED
-    elif catalog_model is not None and (
-        not catalog_model.supported_reasoning_levels
-        or effort in set(catalog_model.supported_reasoning_levels)
-    ):
-        classification = CodexModelSelectionClass.CATALOG_OBSERVED
-    elif provider and provider.casefold() not in {"openai", "chatgpt"}:
+    custom_provider = bool(
+        provider and provider.casefold() not in {"openai", "chatgpt"}
+    )
+    catalog_supports_selection = bool(
+        catalog_model is not None
+        and (
+            not catalog_model.supported_reasoning_levels
+            or effort in set(catalog_model.supported_reasoning_levels)
+        )
+    )
+    if custom_provider:
         classification = CodexModelSelectionClass.CUSTOM_PROVIDER_OBSERVED
     elif not catalog_fresh or not catalog_models:
         classification = CodexModelSelectionClass.CATALOG_STALE
-    else:
+    elif not catalog_supports_selection:
         classification = CodexModelSelectionClass.UNKNOWN
+    elif exact_profile is not None:
+        classification = CodexModelSelectionClass.MANAGED_QUALIFIED
+    else:
+        classification = CodexModelSelectionClass.CATALOG_OBSERVED
+
+    qualified_profile = (
+        exact_profile
+        if classification is CodexModelSelectionClass.MANAGED_QUALIFIED
+        else None
+    )
 
     requires_approval = bool(
-        (exact_profile is not None and exact_profile.elevated)
+        (qualified_profile is not None and qualified_profile.elevated)
         or effort in {"max", "ultra"}
     )
     if active_policy.control_mode is CodexModelControlMode.OBSERVE:
@@ -308,13 +321,20 @@ def classify_codex_model_selection(
         reason = "PBX records direct Codex model choices without gating them."
     elif active_policy.control_mode is CodexModelControlMode.GUARD_ELEVATED:
         allowed = not requires_approval
-        reason = (
-            "An approved bounded model-elevation lease is required."
-            if requires_approval
-            else "The live catalog choice is allowed and recorded."
-        )
+        if requires_approval:
+            reason = "An approved bounded model-elevation lease is required."
+        elif classification in {
+            CodexModelSelectionClass.MANAGED_QUALIFIED,
+            CodexModelSelectionClass.CATALOG_OBSERVED,
+        }:
+            reason = "The live catalog choice is allowed and recorded."
+        else:
+            reason = (
+                "The direct choice remains observable, but current managed "
+                "adoption requires trusted provider and live catalog evidence."
+            )
     else:
-        allowed = bool(exact_profile is not None and not requires_approval)
+        allowed = bool(qualified_profile is not None and not requires_approval)
         reason = (
             "The selection matches an approved PBX profile."
             if allowed
@@ -325,7 +345,9 @@ def classify_codex_model_selection(
         reasoning_effort=effort,
         model_provider=provider,
         classification=classification,
-        managed_profile_id=exact_profile.profile_id if exact_profile else None,
+        managed_profile_id=(
+            qualified_profile.profile_id if qualified_profile is not None else None
+        ),
         requires_approval=requires_approval,
         allowed=allowed,
         reason=reason,

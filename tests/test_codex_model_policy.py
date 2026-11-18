@@ -173,3 +173,44 @@ def test_direct_custom_provider_model_remains_observable() -> None:
         is CodexModelSelectionClass.CUSTOM_PROVIDER_OBSERVED
     )
     assert selection.allowed is True
+
+
+def test_custom_provider_cannot_impersonate_managed_profile() -> None:
+    selection = classify_codex_model_selection(
+        model="gpt-6.2-sol",
+        reasoning_effort="high",
+        model_provider="ollama",
+        catalog=(model("gpt-6.2-sol", "high", "xhigh", "max"),),
+    )
+
+    assert (
+        selection.classification
+        is CodexModelSelectionClass.CUSTOM_PROVIDER_OBSERVED
+    )
+    assert selection.managed_profile_id is None
+    assert selection.allowed is True
+
+
+def test_managed_slug_requires_current_catalog_evidence() -> None:
+    selection = classify_codex_model_selection(
+        model="gpt-6.2-sol",
+        reasoning_effort="high",
+        model_provider="openai",
+        catalog=(),
+        catalog_fresh=False,
+    )
+
+    assert selection.classification is CodexModelSelectionClass.CATALOG_STALE
+    assert selection.managed_profile_id is None
+
+
+def test_managed_slug_absent_from_live_catalog_is_unknown() -> None:
+    selection = classify_codex_model_selection(
+        model="gpt-6.2-sol",
+        reasoning_effort="high",
+        model_provider="openai",
+        catalog=(model("gpt-6.2-astra", "high", "xhigh"),),
+    )
+
+    assert selection.classification is CodexModelSelectionClass.UNKNOWN
+    assert selection.managed_profile_id is None

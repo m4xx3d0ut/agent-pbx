@@ -18,7 +18,11 @@ from ..contracts import (
 from ..store import Store
 from .adapter import CodexSessionAdapter
 from .models import CodexChildRuntime, CodexProfile
-from .policy import classify_codex_model_selection, load_codex_model_policy
+from .policy import (
+    CodexModelSelection,
+    classify_codex_model_selection,
+    load_codex_model_policy,
+)
 
 
 RUNTIME_SNAPSHOT_API_VERSION = "agent-pbx.codex-runtime/v2"
@@ -389,6 +393,35 @@ class CodexRuntimeService:
         with self._lock:
             record = self._record(agent)
             return self._snapshot(agent, record)
+
+    def snapshot_with_current_model_selection(
+        self,
+        agent_id: str,
+    ) -> tuple[dict[str, Any], CodexModelSelection | None]:
+        """Return one runtime snapshot plus a fresh adoption classification.
+
+        Adoption must not trust the classification persisted with an earlier
+        protocol event. Provider or catalog evidence can change between the
+        observation and an operator's later request to adopt that choice.
+        """
+
+        agent = self.store.get_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        with self._lock:
+            record = self._record(agent)
+            snapshot = self._snapshot(agent, record)
+            profile = record.profile
+            if profile is None or not profile.model:
+                return snapshot, None
+            selection = classify_codex_model_selection(
+                model=profile.model,
+                reasoning_effort=profile.reasoning_effort,
+                model_provider=profile.model_provider or "",
+                catalog=self._catalog(),
+                policy=self.model_policy,
+            )
+            return snapshot, selection
 
     def _record(self, agent: dict[str, Any]) -> RuntimeRecord:
         agent_id = str(agent["agent_id"])

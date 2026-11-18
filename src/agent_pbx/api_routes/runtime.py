@@ -11,7 +11,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, statu
 
 from ..auth import get_store, require_token
 from ..codex.profiles import (
-    MANAGED_CODEX_PROFILES,
+    managed_profile_for,
     managed_profile_view,
 )
 from ..codex.policy import load_codex_model_policy
@@ -175,8 +175,8 @@ def register_runtime_routes(
         """
 
         try:
-            snapshot = await asyncio.to_thread(
-                request.app.state.codex_runtime.snapshot,
+            snapshot, current_selection = await asyncio.to_thread(
+                request.app.state.codex_runtime.snapshot_with_current_model_selection,
                 agent_id,
             )
         except KeyError as exc:
@@ -184,7 +184,9 @@ def register_runtime_routes(
         profile = snapshot.get("profile")
         if not isinstance(profile, dict):
             raise HTTPException(status_code=409, detail="runtime model is not observed")
-        selection_class = str(profile.get("selection_class") or "")
+        if current_selection is None:
+            raise HTTPException(status_code=409, detail="runtime model is not observed")
+        selection_class = current_selection.classification.value
         if selection_class not in {"managed_qualified", "catalog_observed"}:
             raise HTTPException(
                 status_code=409,
@@ -193,15 +195,15 @@ def register_runtime_routes(
                     "be adopted"
                 ),
             )
-        model = str(profile.get("model") or "").strip()
-        effort = str(profile.get("reasoning_effort") or "").strip()
+        model = current_selection.model
+        effort = current_selection.reasoning_effort
         if not model or not effort:
             raise HTTPException(
                 status_code=409,
                 detail="runtime model and reasoning effort must both be observed",
             )
-        managed_profile_id = str(profile.get("managed_profile_id") or "").strip()
-        if profile.get("policy_allowed") is False or profile.get("requires_approval"):
+        managed_profile_id = str(current_selection.managed_profile_id or "").strip()
+        if not current_selection.allowed or current_selection.requires_approval:
             await asyncio.to_thread(store.expire_model_elevations)
             matching_lease = next(
                 (
@@ -211,8 +213,15 @@ def register_runtime_routes(
                         agent_id=agent_id,
                         limit=20,
                     )
-                    if str(lease.get("requested_profile") or "")
-                    == managed_profile_id
+                    if (
+                        (
+                            lease_profile := managed_profile_for(
+                                lease.get("requested_profile")
+                            )
+                        )
+                        is not None
+                        and lease_profile.profile_id == managed_profile_id
+                    )
                     and str(lease.get("status") or "") in {"approved", "active"}
                 ),
                 None,
@@ -236,7 +245,7 @@ def register_runtime_routes(
                 profile.get("reasoning_summary") or "detailed"
             ),
             "codex_model_service_tier": str(profile.get("service_tier") or ""),
-            "codex_model_provider": str(profile.get("model_provider") or ""),
+            "codex_model_provider": current_selection.model_provider,
             "codex_model_selection_class": selection_class,
             "codex_model_adopted_at": time.time(),
         }
@@ -392,7 +401,7 @@ def register_runtime_routes(
         payload: ModelElevationRequest,
         store: Any = Depends(get_store),
     ) -> dict[str, object]:
-        profile = MANAGED_CODEX_PROFILES.get(payload.requested_profile)
+        profile = managed_profile_for(payload.requested_profile)
         if profile is None or not profile.elevated:
             raise HTTPException(
                 status_code=400, detail="requested profile is not elevated"
@@ -410,8 +419,10 @@ def register_runtime_routes(
                 ),
             )
         try:
+            request_data = payload.model_dump()
+            request_data["requested_profile"] = profile.profile_id
             lease, created = store.request_or_reuse_model_elevation(
-                **payload.model_dump()
+                **request_data
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -293,6 +293,24 @@ def direct_model_catalog() -> tuple[CodexModelOption, ...]:
     )
 
 
+def compatibility_model_catalog() -> tuple[CodexModelOption, ...]:
+    return (
+        CodexModelOption(
+            slug="gpt-5.6-sol",
+            display_name="Sol 5.6",
+            default_reasoning_level="xhigh",
+            supported_reasoning_levels=("high", "xhigh", "max"),
+            service_tiers=(),
+            default_service_tier="",
+            visibility="list",
+            shell_type="shell",
+            supported_in_api=True,
+            supports_verbosity=True,
+            default_verbosity="high",
+        ),
+    )
+
+
 def test_runtime_direct_model_choice_can_be_adopted_per_entity(tmp_path: Path) -> None:
     client, app = runtime_client(tmp_path)
     app.state.codex_runtime.catalog_loader = direct_model_catalog
@@ -328,6 +346,90 @@ def test_runtime_direct_model_choice_can_be_adopted_per_entity(tmp_path: Path) -
     assert metadata["codex_model_preset"] == "catalog:gpt-6.2-sol:low"
     assert metadata["codex_model"] == "gpt-6.2-sol"
     assert metadata["codex_model_reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize(
+    ("model_slug", "provider", "catalog", "expected_class"),
+    (
+        (
+            "gpt-6.2-sol",
+            "ollama",
+            direct_model_catalog(),
+            "custom_provider_observed",
+        ),
+        ("gpt-6.2-sol", "openai", (), "catalog_stale"),
+        ("gpt-6.2-unknown", "openai", direct_model_catalog(), "unknown"),
+    ),
+)
+def test_runtime_adoption_revalidates_provider_and_catalog_evidence(
+    tmp_path: Path,
+    model_slug: str,
+    provider: str,
+    catalog: tuple[CodexModelOption, ...],
+    expected_class: str,
+) -> None:
+    client, app = runtime_client(tmp_path)
+    app.state.codex_runtime.catalog_loader = lambda: catalog
+    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+
+    observed = client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "thread/settings/updated",
+            "params": {
+                "threadId": "thread-root",
+                "threadSettings": {
+                    "model": model_slug,
+                    "modelProvider": provider,
+                    "effort": "high",
+                },
+            },
+        },
+    )
+    assert observed.status_code == 200
+    assert observed.json()["profile"]["selection_class"] == expected_class
+
+    adopted = client.post(
+        "/v2/agents/agent-a/codex-runtime/adopt-model",
+        headers=HEADERS,
+    )
+    assert adopted.status_code == 409
+    metadata = app.state.store.get_agent("agent-a")["metadata"]
+    assert "codex_model_adopted_at" not in metadata
+
+
+def test_runtime_adoption_rechecks_catalog_after_observation(tmp_path: Path) -> None:
+    client, app = runtime_client(tmp_path)
+    app.state.codex_runtime.catalog_loader = direct_model_catalog
+    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+    observed = client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "thread/settings/updated",
+            "params": {
+                "threadId": "thread-root",
+                "threadSettings": {
+                    "model": "gpt-6.2-sol",
+                    "modelProvider": "openai",
+                    "effort": "high",
+                },
+            },
+        },
+    )
+    assert observed.status_code == 200
+    assert observed.json()["profile"]["selection_class"] == "managed_qualified"
+
+    app.state.codex_runtime.catalog_loader = lambda: ()
+    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+    adopted = client.post(
+        "/v2/agents/agent-a/codex-runtime/adopt-model",
+        headers=HEADERS,
+    )
+    assert adopted.status_code == 409
 
 
 def test_runtime_direct_elevation_cannot_be_adopted_without_lease(
@@ -380,7 +482,7 @@ def test_runtime_direct_elevation_can_be_adopted_with_matching_active_lease(
             "scope": "one_task",
         },
     )
-    assert requested.status_code == 200
+    assert requested.status_code == 200, requested.text
     lease_id = requested.json()["lease_id"]
     approved = client.post(
         f"/v2/codex/elevations/{lease_id}/decision",
@@ -425,6 +527,150 @@ def test_runtime_direct_elevation_can_be_adopted_with_matching_active_lease(
     assert adopted.json()["profile_id"] == "sol-6.2-max"
     metadata = app.state.store.get_agent("agent-a")["metadata"]
     assert metadata["codex_model_preset"] == "sol-6.2-max"
+
+
+def test_runtime_custom_provider_elevation_is_rejected_even_with_lease(
+    tmp_path: Path,
+) -> None:
+    client, app = runtime_client(tmp_path)
+    app.state.codex_runtime.catalog_loader = direct_model_catalog
+    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+    requested = client.post(
+        "/v2/codex/elevations",
+        headers=HEADERS,
+        json={
+            "agent_id": "agent-a",
+            "requested_profile": "sol-6.2-max",
+            "prior_profile": "sol-6.2-high",
+            "justification": "Bounded difficult task",
+            "scope": "one_task",
+        },
+    )
+    lease_id = requested.json()["lease_id"]
+    client.post(
+        f"/v2/codex/elevations/{lease_id}/decision",
+        headers=HEADERS,
+        json={
+            "approved": True,
+            "approved_by": "agent-pbx-tui-user",
+            "duration_seconds": 60,
+        },
+    )
+    client.post(
+        f"/v2/codex/elevations/{lease_id}/activate",
+        headers=HEADERS,
+        json={"transition": {"phase": "runtime_associated"}},
+    )
+    observed = client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "thread/settings/updated",
+            "params": {
+                "threadId": "thread-root",
+                "threadSettings": {
+                    "model": "gpt-6.2-sol",
+                    "modelProvider": "ollama",
+                    "effort": "max",
+                },
+            },
+        },
+    )
+    assert observed.status_code == 200
+    assert observed.json()["profile"]["selection_class"] == "custom_provider_observed"
+
+    adopted = client.post(
+        "/v2/agents/agent-a/codex-runtime/adopt-model",
+        headers=HEADERS,
+    )
+    assert adopted.status_code == 409
+
+
+@pytest.mark.parametrize(
+    ("requested_profile", "canonical_profile"),
+    (
+        ("sol-5.6-max", "sol-5.6-max"),
+        ("sol-max", "sol-5.6-max"),
+        ("sol5.6-max", "sol-5.6-max"),
+        ("gpt-5.6-sol-max", "sol-5.6-max"),
+    ),
+)
+def test_runtime_elevation_request_canonicalizes_legacy_sol_aliases(
+    tmp_path: Path,
+    requested_profile: str,
+    canonical_profile: str,
+) -> None:
+    client, _app = runtime_client(tmp_path)
+    requested = client.post(
+        "/v2/codex/elevations",
+        headers=HEADERS,
+        json={
+            "agent_id": "agent-a",
+            "requested_profile": requested_profile,
+            "prior_profile": "sol-xhigh",
+            "justification": "Compatibility rollback validation",
+            "scope": "one_task",
+        },
+    )
+    assert requested.status_code == 200, requested.text
+    assert requested.json()["requested_profile"] == canonical_profile
+
+
+def test_runtime_legacy_alias_lease_matches_canonical_observed_profile(
+    tmp_path: Path,
+) -> None:
+    legacy_client, legacy_app = runtime_client(tmp_path)
+    legacy_app.state.codex_runtime.catalog_loader = compatibility_model_catalog
+    legacy_app.state.codex_runtime._model_catalog_loaded_at = 0.0
+
+    legacy_lease, _created = legacy_app.state.store.request_or_reuse_model_elevation(
+        agent_id="agent-a",
+        requested_profile="sol-max",
+        prior_profile="sol-xhigh",
+        justification="Persisted compatibility rollback validation",
+        scope="one_task",
+    )
+    lease_id = legacy_lease["lease_id"]
+    decided = legacy_client.post(
+        f"/v2/codex/elevations/{lease_id}/decision",
+        headers=HEADERS,
+        json={
+            "approved": True,
+            "approved_by": "agent-pbx-tui-user",
+            "duration_seconds": 60,
+        },
+    )
+    assert decided.status_code == 200
+    activated = legacy_client.post(
+        f"/v2/codex/elevations/{lease_id}/activate",
+        headers=HEADERS,
+        json={"transition": {"phase": "runtime_associated"}},
+    )
+    assert activated.status_code == 200
+    observed = legacy_client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "thread/settings/updated",
+            "params": {
+                "threadId": "thread-root",
+                "threadSettings": {
+                    "model": "gpt-5.6-sol",
+                    "modelProvider": "openai",
+                    "effort": "max",
+                },
+            },
+        },
+    )
+    assert observed.status_code == 200
+    adopted = legacy_client.post(
+        "/v2/agents/agent-a/codex-runtime/adopt-model",
+        headers=HEADERS,
+    )
+    assert adopted.status_code == 200
+    assert adopted.json()["profile_id"] == "sol-5.6-max"
 
 
 def test_runtime_endpoint_rejects_unrelated_thread(tmp_path: Path) -> None:
