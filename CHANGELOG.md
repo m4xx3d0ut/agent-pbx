@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v2.6.0rc3 - 2026-11-18
+
+### Fixed
+
+- Normalize retained Sol 5.6 elevation aliases before the TUI compares an
+  approved or active lease with its selected preset. This keeps historical
+  `sol-max` leases compatible with the API's canonical `sol-5.6-max` identity
+  during approval, activation, resume, and rollback.
+
+### Qualification
+
+- Add a TUI regression proving that canonical API lease responses match the
+  retained Sol 5.6 preset alias without relaxing the elevated-profile policy.
+- Keep schema 46, v2.6 role defaults, live-catalog adoption, managed tmux
+  topology, WorkerBee policy, and current session mappings unchanged.
+
 ## v2.6.0rc2 - 2026-11-18
 
 ### Fixed
