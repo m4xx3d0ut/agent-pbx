@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import subprocess
@@ -230,6 +231,19 @@ def test_tui_widget_action_tab_and_keymap_ownership_is_versioned() -> None:
         "priority_gate_owner": "AgentPBXTUI._check_bindings",
         "priority_gate_sha256": "0a5c63c989c44e150a67405cbb663a82afb6862ef17f6c5e729a674a366ff17e",
     }
+
+
+def test_tui_method_identity_ignores_version_specific_empty_type_parameters() -> None:
+    checker = _checker()
+    tree = checker._tree(ROOT / "src" / "agent_pbx" / "tui.py")
+    app = checker._class_node(tree, "AgentPBXTUI")
+    method = checker._class_method(app, "pbx_owns_key_under_terminal_focus")
+    expected = checker._method_sha256(method)
+    if "type_params" not in method._fields:
+        method._fields = (*method._fields, "type_params")
+    method.type_params = []
+
+    assert checker._method_sha256(method) == expected
 
 
 def test_owned_route_families_remain_complete(tmp_path: Path) -> None:

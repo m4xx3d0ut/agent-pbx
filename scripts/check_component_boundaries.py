@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import hashlib
 import json
 import sqlite3
@@ -425,7 +426,23 @@ def _class_method(node: ast.ClassDef, name: str) -> ast.FunctionDef | ast.AsyncF
 
 
 def _method_sha256(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
-    normalized = ast.dump(node, annotate_fields=True, include_attributes=False)
+    portable = copy.deepcopy(node)
+    for child in ast.walk(portable):
+        if getattr(child, "type_params", None) == []:
+            delattr(child, "type_params")
+    try:
+        normalized = ast.dump(
+            portable,
+            annotate_fields=True,
+            include_attributes=False,
+            show_empty=True,
+        )
+    except TypeError:
+        normalized = ast.dump(
+            portable,
+            annotate_fields=True,
+            include_attributes=False,
+        )
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 

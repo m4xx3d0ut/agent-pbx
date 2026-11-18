@@ -70,6 +70,9 @@
 - Preserve active TUI run markers on macOS and other hosts without Linux
   process-start ticks by falling back to a non-signalling PID liveness probe;
   stale markers are still reaped when the process is absent.
+- Normalize version-specific empty Python AST fields in the component-boundary
+  checker so one TUI source tree retains one compatibility identity across the
+  supported Python 3.10 and 3.12 release matrix.
 - Deliver direct-caller campaign prompts through the same exact managed-runtime,
   process, session, workspace, input-readiness, and writer-lease contract used
   by Operator targets.
