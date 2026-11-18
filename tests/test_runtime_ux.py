@@ -363,6 +363,70 @@ def test_runtime_direct_elevation_cannot_be_adopted_without_lease(
     assert "elevation lease" in adopted.json()["detail"]
 
 
+def test_runtime_direct_elevation_can_be_adopted_with_matching_active_lease(
+    tmp_path: Path,
+) -> None:
+    client, app = runtime_client(tmp_path)
+    app.state.codex_runtime.catalog_loader = direct_model_catalog
+    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+    requested = client.post(
+        "/v2/codex/elevations",
+        headers=HEADERS,
+        json={
+            "agent_id": "agent-a",
+            "requested_profile": "sol-6.2-max",
+            "prior_profile": "sol-6.2-high",
+            "justification": "Bounded difficult task",
+            "scope": "one_task",
+        },
+    )
+    assert requested.status_code == 200
+    lease_id = requested.json()["lease_id"]
+    approved = client.post(
+        f"/v2/codex/elevations/{lease_id}/decision",
+        headers=HEADERS,
+        json={
+            "approved": True,
+            "approved_by": "agent-pbx-tui-user",
+            "duration_seconds": 60,
+        },
+    )
+    assert approved.status_code == 200
+    activated = client.post(
+        f"/v2/codex/elevations/{lease_id}/activate",
+        headers=HEADERS,
+        json={"transition": {"phase": "runtime_associated"}},
+    )
+    assert activated.status_code == 200
+
+    observed = client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "thread/settings/updated",
+            "params": {
+                "threadId": "thread-root",
+                "threadSettings": {
+                    "model": "gpt-6.2-sol",
+                    "modelProvider": "openai",
+                    "effort": "max",
+                },
+            },
+        },
+    )
+    assert observed.status_code == 200
+
+    adopted = client.post(
+        "/v2/agents/agent-a/codex-runtime/adopt-model",
+        headers=HEADERS,
+    )
+    assert adopted.status_code == 200
+    assert adopted.json()["profile_id"] == "sol-6.2-max"
+    metadata = app.state.store.get_agent("agent-a")["metadata"]
+    assert metadata["codex_model_preset"] == "sol-6.2-max"
+
+
 def test_runtime_endpoint_rejects_unrelated_thread(tmp_path: Path) -> None:
     client, _app = runtime_client(tmp_path)
     response = client.post(

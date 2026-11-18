@@ -193,11 +193,6 @@ def register_runtime_routes(
                     "be adopted"
                 ),
             )
-        if profile.get("policy_allowed") is False or profile.get("requires_approval"):
-            raise HTTPException(
-                status_code=409,
-                detail="the observed model requires a bounded elevation lease",
-            )
         model = str(profile.get("model") or "").strip()
         effort = str(profile.get("reasoning_effort") or "").strip()
         if not model or not effort:
@@ -206,6 +201,30 @@ def register_runtime_routes(
                 detail="runtime model and reasoning effort must both be observed",
             )
         managed_profile_id = str(profile.get("managed_profile_id") or "").strip()
+        if profile.get("policy_allowed") is False or profile.get("requires_approval"):
+            await asyncio.to_thread(store.expire_model_elevations)
+            matching_lease = next(
+                (
+                    lease
+                    for lease in await asyncio.to_thread(
+                        store.list_model_elevations,
+                        agent_id=agent_id,
+                        limit=20,
+                    )
+                    if str(lease.get("requested_profile") or "")
+                    == managed_profile_id
+                    and str(lease.get("status") or "") in {"approved", "active"}
+                ),
+                None,
+            )
+            if matching_lease is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "the observed model requires an unexpired matching "
+                        "bounded elevation lease"
+                    ),
+                )
         adopted_profile_id = managed_profile_id or f"catalog:{model}:{effort}"
         updates = {
             "codex_model_preset": adopted_profile_id,
