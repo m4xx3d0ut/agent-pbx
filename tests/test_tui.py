@@ -14150,6 +14150,27 @@ def test_tui_palette_keeps_explicit_operator_selection(monkeypatch) -> None:
     assert app.selected_or_cursor_agent_id() == "caller-in-focus"
 
 
+def test_tui_restart_notice_distinguishes_persisted_model_from_role_default() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    app.agents = {
+        "caller-a": {
+            "agent_id": "caller-a",
+            "agent_type": "caller",
+            "metadata": {"codex_model_preset": "sol-5.6-xhigh"},
+        }
+    }
+    app.codex_model_policy = SimpleNamespace(
+        profile_id_for_role=lambda _role: "sol-6.2-high"
+    )
+
+    notice = app.persisted_restart_model_notice("caller-a")
+
+    assert notice is not None
+    assert "/restart preserves Sol 5.6 / xhigh" in notice
+    assert "current role default is Sol 6.2 / high" in notice
+    assert "/codex model return" in notice
+
+
 def test_tui_theme_toggle_updates_app_theme() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
 

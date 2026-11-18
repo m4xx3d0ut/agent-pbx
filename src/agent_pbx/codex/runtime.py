@@ -137,6 +137,13 @@ class CodexRuntimeService:
         raw_params = dict(params or {})
         with self._lock:
             record = self._record(agent)
+            if current < runtime_generation_started_at(agent):
+                # Passive app-server readers may replay a thread/started or
+                # settings event from before an in-place tmux/Codex restart.
+                # The session id is intentionally preserved across that
+                # transition, so association alone cannot prove that the
+                # event belongs to the current process generation.
+                return self._snapshot(agent, record)
             safe_params = safe_event_detail(method, raw_params)
             evidence = record.adapter.observe_app_server(
                 thread_id=thread_id,
@@ -434,7 +441,7 @@ class CodexRuntimeService:
             )
             self._records[agent_id] = record
         if not record.hydrated:
-            self._hydrate(agent_id, record)
+            self._hydrate(agent, record)
             record.hydrated = True
         if record.profile is None:
             record.profile = profile_from_agent(agent)
@@ -451,7 +458,8 @@ class CodexRuntimeService:
                 )
         return record
 
-    def _hydrate(self, agent_id: str, record: RuntimeRecord) -> None:
+    def _hydrate(self, agent: Mapping[str, Any], record: RuntimeRecord) -> None:
+        agent_id = str(agent["agent_id"])
         events = self.store.list_subject_events(
             agent_id,
             event_type=RUNTIME_EVENT_TYPE,
@@ -469,8 +477,15 @@ class CodexRuntimeService:
             record.adapter.identity.codex_session_id or ""
         ):
             return
+        event_observed_at = safe_timestamp(
+            payload.get("observed_at"),
+            events[-1].get("created_at"),
+        )
+        hydrate_current_generation = (
+            event_observed_at >= runtime_generation_started_at(agent)
+        )
         evidence = snapshot.get("evidence")
-        if isinstance(evidence, dict):
+        if hydrate_current_generation and isinstance(evidence, dict):
             try:
                 record.adapter.observe(
                     CodexRuntimeState(str(evidence["state"])),
@@ -482,7 +497,11 @@ class CodexRuntimeService:
             except (KeyError, TypeError, ValueError):
                 pass
         profile = snapshot.get("profile")
-        if isinstance(profile, dict) and profile.get("model"):
+        if (
+            hydrate_current_generation
+            and isinstance(profile, dict)
+            and profile.get("model")
+        ):
             record.profile = CodexProfile(
                 profile_id=str(profile.get("profile_id") or "observed"),
                 model=str(profile["model"]),
@@ -500,7 +519,7 @@ class CodexRuntimeService:
                 or None,
             )
         context = snapshot.get("context")
-        if isinstance(context, dict):
+        if hydrate_current_generation and isinstance(context, dict):
             record.context = {
                 key: value
                 for key, value in context.items()
@@ -963,6 +982,17 @@ def profile_from_agent(agent: Mapping[str, Any]) -> CodexProfile | None:
     )
 
 
+def runtime_generation_started_at(agent: Mapping[str, Any]) -> float:
+    """Return the durable lower bound for current-process runtime evidence."""
+
+    metadata = (
+        agent.get("metadata")
+        if isinstance(agent.get("metadata"), Mapping)
+        else {}
+    )
+    return safe_timestamp(metadata.get("last_tmux_restart_at"))
+
+
 def safe_event_detail(method: str, params: Mapping[str, Any]) -> dict[str, object]:
     detail: dict[str, object] = {"method": method}
     if method == "thread/settings/updated":
@@ -1156,3 +1186,11 @@ def safe_float(value: object) -> float | None:
         return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def safe_timestamp(*values: object) -> float:
+    for value in values:
+        parsed = safe_float(value)
+        if parsed is not None and parsed >= 0:
+            return parsed
+    return 0.0

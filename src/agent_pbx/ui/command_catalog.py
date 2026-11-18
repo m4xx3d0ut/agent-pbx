@@ -347,7 +347,11 @@ def iter_system_commands(
     )
     yield catalog.command("/esc", "Send Escape to the selected agent", app.palette_escape)
     yield catalog.command("/ctrlc", "Send Ctrl+C to the selected tmux pane", app.palette_ctrl_c)
-    yield catalog.command("/restart", "Restart the selected tmux Codex pane", app.palette_tmux_restart)
+    yield catalog.command(
+        "/restart",
+        "Restart the selected tmux Codex pane using its persisted model",
+        app.palette_tmux_restart,
+    )
     yield catalog.command("/codex restart", "Restart the selected tmux Codex pane", app.palette_tmux_restart)
     yield catalog.command("/codex", "Open global Codex config", app.palette_codex_config)
     yield catalog.command("/codex config", "Open global Codex config", app.palette_codex_config)

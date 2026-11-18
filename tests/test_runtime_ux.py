@@ -982,6 +982,77 @@ def test_runtime_context_and_persisted_projection_restore(tmp_path: Path) -> Non
     assert restored["session_id"] == "thread-root"
 
 
+def test_runtime_restart_generation_rejects_stale_profile_projection(
+    tmp_path: Path,
+) -> None:
+    _client, app = runtime_client(tmp_path)
+    runtime = app.state.codex_runtime
+    runtime.observe_protocol(
+        "agent-a",
+        thread_id="thread-root",
+        method="thread/started",
+        params={
+            "thread": {
+                "id": "thread-root",
+                "model": "gpt-5.6-sol",
+                "reasoningEffort": "xhigh",
+                "modelProvider": "openai",
+            }
+        },
+        observed_at=100.0,
+    )
+    app.state.store.merge_agent_metadata(
+        "agent-a",
+        {
+            "codex_model_preset": "sol-6.2-xhigh",
+            "codex_model": "gpt-6.2-sol",
+            "codex_model_reasoning_effort": "xhigh",
+            "last_tmux_restart_at": 200.0,
+        },
+    )
+
+    restarted = CodexRuntimeService(
+        app.state.store,
+        catalog_loader=direct_model_catalog,
+    )
+    snapshot = restarted.snapshot("agent-a")
+    assert snapshot["profile"]["profile_id"] == "sol-6.2-xhigh"
+    assert snapshot["profile"]["model"] == "gpt-6.2-sol"
+
+    stale = restarted.observe_protocol(
+        "agent-a",
+        thread_id="thread-root",
+        method="thread/started",
+        params={
+            "thread": {
+                "id": "thread-root",
+                "model": "gpt-5.6-sol",
+                "reasoningEffort": "xhigh",
+                "modelProvider": "openai",
+            }
+        },
+        observed_at=150.0,
+    )
+    assert stale["profile"]["model"] == "gpt-6.2-sol"
+
+    current = restarted.observe_protocol(
+        "agent-a",
+        thread_id="thread-root",
+        method="thread/settings/updated",
+        params={
+            "threadSettings": {
+                "model": "gpt-6.2-sol",
+                "effort": "high",
+                "modelProvider": "openai",
+            }
+        },
+        observed_at=201.0,
+    )
+    assert current["profile"]["model"] == "gpt-6.2-sol"
+    assert current["profile"]["reasoning_effort"] == "high"
+    assert current["profile"]["observation_source"] == "thread_settings_updated"
+
+
 def test_runtime_presentation_requires_observed_child_capability() -> None:
     snapshot = {
         "state": "thinking",

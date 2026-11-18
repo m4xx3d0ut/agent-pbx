@@ -7477,10 +7477,31 @@ class AgentPBXTUI(App[None]):
         agent_id = self.palette_agent_id()
         if agent_id is None:
             return
+        notice = self.persisted_restart_model_notice(agent_id)
+        if notice:
+            self.notify(notice, severity="warning")
         self.run_worker(
             self.restart_tmux_codex_session(agent_id),
             name=f"tmux-restart-{slugify(agent_id)}",
             exclusive=True,
+        )
+
+    def persisted_restart_model_notice(self, agent_id: str) -> str | None:
+        """Explain when a process restart will preserve a non-default model."""
+
+        agent = self.agents.get(agent_id)
+        if not isinstance(agent, dict):
+            return None
+        persisted = codex_model_preset_from_metadata(self.agent_metadata(agent))
+        if persisted is None:
+            return None
+        role_default = self.default_codex_model_preset_for_agent(agent_id)
+        if persisted.key == role_default.key:
+            return None
+        return (
+            f"/restart preserves {persisted.label}; the current role default is "
+            f"{role_default.label}. Use /codex model return or an explicit "
+            "/codex model preset to migrate models."
         )
 
     def palette_toggle_embedded_terminal(self) -> None:
@@ -18183,7 +18204,8 @@ class AgentPBXTUI(App[None]):
         await self.mark_operator_authority_activated(agent_id)
         self.save_settings()
         self.notify(
-            f"Restarted {agent_id} in place on Codex session {target.session_id}."
+            f"Restarted {agent_id} in place on Codex session {target.session_id} "
+            f"using {effective_model_preset.label if effective_model_preset else 'its persisted model'}."
         )
         return True
 
@@ -18555,7 +18577,10 @@ class AgentPBXTUI(App[None]):
         await self.mark_operator_authority_activated(agent_id)
         self.save_settings()
         suffix = f" on Codex session {target.session_id}" if target else ""
-        self.notify(f"Restarted {agent_id} in place{suffix}.")
+        self.notify(
+            f"Restarted {agent_id} in place{suffix} using "
+            f"{effective_model_preset.label if effective_model_preset else 'its persisted model'}."
+        )
         return True
 
     async def relaunch_caller_codex(
@@ -18693,7 +18718,8 @@ class AgentPBXTUI(App[None]):
             )
         self.save_settings()
         self.notify(
-            f"Restarted {agent_id} in place on Codex session {session_id}."
+            f"Restarted {agent_id} in place on Codex session {session_id} "
+            f"using {effective_model_preset.label if effective_model_preset else 'its persisted model'}."
         )
         return True
 
@@ -19340,7 +19366,10 @@ class AgentPBXTUI(App[None]):
         if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
             await self.mark_operator_authority_activated(agent_id)
         self.save_settings()
-        self.notify(f"Resumed {agent_id} on managed tmux pane {pane_id}.")
+        self.notify(
+            f"Resumed {agent_id} on managed tmux pane {pane_id} using "
+            f"{preset.label if preset else 'its persisted model'}."
+        )
         return True
 
     async def resolve_tmux_send_pane(
