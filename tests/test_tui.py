@@ -14194,10 +14194,21 @@ async def test_tui_palette_includes_operator_commands() -> None:
     assert "/codex model" in titles
     assert "/codex model plan" in titles
     assert "/codex model cleanup plan" in titles
-    assert "/codex model terra-max" in titles
-    assert "/codex model default terra-max" in titles
+    assert "/codex model native" in titles
+    assert "/codex model inspect" in titles
+    assert "/codex model adopt" in titles
+    assert "/codex model return" in titles
+    assert "/codex model terra-xhigh" in titles
+    assert "/codex model sol-medium" in titles
+    assert "/codex model sol-high" in titles
     assert "/codex model sol-max" in titles
+    assert "/codex model sol-ultra" in titles
     assert "/codex model sol-xhigh" in titles
+    assert "/codex model astra-xhigh" in titles
+    assert "/codex model astra-max" in titles
+    assert "/codex model astra-ultra" in titles
+    assert "/codex model luna-high" in titles
+    assert "/codex model default luna-high" in titles
     assert "/codex model default sol-max" in titles
     assert "/codex model default sol-xhigh" in titles
     assert "/workspace launch" in titles
@@ -14763,10 +14774,21 @@ def test_tui_joplin_commands_are_reserved_builtin_names() -> None:
         "/codex mcp wire",
         "/codex update",
         "/codex model",
-        "/codex model terra-max",
-        "/codex model default terra-max",
+        "/codex model native",
+        "/codex model inspect",
+        "/codex model adopt",
+        "/codex model return",
+        "/codex model terra-xhigh",
+        "/codex model sol-medium",
+        "/codex model sol-high",
         "/codex model sol-max",
+        "/codex model sol-ultra",
         "/codex model sol-xhigh",
+        "/codex model astra-xhigh",
+        "/codex model astra-max",
+        "/codex model astra-ultra",
+        "/codex model luna-high",
+        "/codex model default luna-high",
         "/codex model default sol-max",
         "/codex model default sol-xhigh",
     } <= names
@@ -19065,9 +19087,9 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
         "AGENT_PBX_LOGICAL_OPERATOR_ID": "operator-0",
         "AGENT_PBX_OPERATOR_CWD": str(Path.cwd()),
         "AGENT_PBX_CWD": str(Path.cwd()),
-        "AGENT_PBX_CODEX_MODEL_PRESET": "sol-5.6-xhigh",
-        "AGENT_PBX_CODEX_MODEL": "gpt-5.6-sol",
-        "AGENT_PBX_CODEX_REASONING_EFFORT": "xhigh",
+        "AGENT_PBX_CODEX_MODEL_PRESET": "sol-6.2-high",
+        "AGENT_PBX_CODEX_MODEL": "gpt-6.2-sol",
+        "AGENT_PBX_CODEX_REASONING_EFFORT": "high",
         "AGENT_PBX_CODEX_REASONING_SUMMARY": "detailed",
         "AGENT_PBX_CODEX_VERBOSITY": "high",
         "AGENT_PBX_WORKERBEE_GATEWAY_TOKEN": "apbx_fixture-token",
@@ -19858,8 +19880,8 @@ async def test_tui_restart_tmux_caller_resumes_known_session(monkeypatch) -> Non
         for index, value in enumerate(launch_argv[:-1])
         if value == "-c"
     ]
-    assert 'model="gpt-5.6-sol"' in config_values
-    assert 'model_reasoning_effort="high"' in config_values
+    assert 'model="gpt-6.2-sol"' in config_values
+    assert 'model_reasoning_effort="medium"' in config_values
     assert 'model_reasoning_summary="detailed"' in config_values
     assert 'model_verbosity="high"' in config_values
     assert "check_for_update_on_startup=false" in config_values
@@ -20388,8 +20410,8 @@ async def test_tui_restart_tmux_caller_uses_current_shell_for_unknown_launch_com
         for index, value in enumerate(launch_argv[:-1])
         if value == "-c"
     ]
-    assert 'model="gpt-5.6-sol"' in config_values
-    assert 'model_reasoning_effort="high"' in config_values
+    assert 'model="gpt-6.2-sol"' in config_values
+    assert 'model_reasoning_effort="medium"' in config_values
     assert captures in ([], ["agent-1"])
 
 
@@ -27739,7 +27761,7 @@ def test_tui_codex_model_preset_metadata_and_overrides() -> None:
         assert sol_env["AGENT_PBX_CODEX_VERBOSITY"] == "high"
 
 
-async def test_tui_saving_model_default_preserves_summary_and_refuses_sol_max() -> None:
+async def test_tui_saving_model_default_preserves_summary_and_refuses_elevations() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
     requests: list[dict[str, object]] = []
 
@@ -27767,9 +27789,9 @@ async def test_tui_saving_model_default_preserves_summary_and_refuses_sol_max() 
     app.refresh_codex_posture = fake_refresh  # type: ignore[method-assign]
     app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
 
-    terra = codex_model_preset_for("terra-max")
-    sol_xhigh = codex_model_preset_for("sol-xhigh")
-    sol_max = codex_model_preset_for("sol-max")
+    terra = codex_model_preset_for("terra-6.1-xhigh")
+    sol_xhigh = codex_model_preset_for("sol-6.2-xhigh")
+    sol_max = codex_model_preset_for("sol-6.2-max")
     assert terra is not None
     assert sol_xhigh is not None
     assert sol_max is not None
@@ -27782,8 +27804,8 @@ async def test_tui_saving_model_default_preserves_summary_and_refuses_sol_max() 
         "path": "/v1/codex/config",
         "json": {
             "updates": {
-                "model": "gpt-5.6-terra",
-                "model_reasoning_effort": "max",
+                "model": "gpt-6.1-terra",
+                "model_reasoning_effort": "xhigh",
                 "model_verbosity": "high",
                 "model_reasoning_summary": "detailed",
             }
@@ -27794,7 +27816,7 @@ async def test_tui_saving_model_default_preserves_summary_and_refuses_sol_max() 
         "path": "/v1/codex/config",
         "json": {
             "updates": {
-                "model": "gpt-5.6-sol",
+                "model": "gpt-6.2-sol",
                 "model_reasoning_effort": "xhigh",
                 "model_verbosity": "high",
                 "model_reasoning_summary": "detailed",
@@ -28160,11 +28182,11 @@ def test_tui_launch_policy_matrix_preserves_bytes_order_and_global_config(
         ), role
         assert overrides[8:13] == explicit_model, role
         assert overrides[13:] == terminal, role
-        assert overrides[4] == 'model="gpt-5.6-sol"', role
+        assert overrides[4] == 'model="gpt-6.2-sol"', role
         assert overrides[5] == (
-            'model_reasoning_effort="high"'
+            'model_reasoning_effort="medium"'
             if role == "caller"
-            else 'model_reasoning_effort="xhigh"'
+            else 'model_reasoning_effort="high"'
         ), role
         assert overrides[6:8] == [
             'model_reasoning_summary="detailed"',
@@ -29392,12 +29414,12 @@ def test_tui_role_launches_use_distinct_sol_reasoning_defaults(
         mcp_url="http://127.0.0.1:8767/mcp",
     )
 
-    assert 'model="gpt-5.6-sol"' in caller
-    assert 'model_reasoning_effort="high"' in caller
+    assert 'model="gpt-6.2-sol"' in caller
+    assert 'model_reasoning_effort="medium"' in caller
     assert 'model_reasoning_summary="detailed"' in caller
     assert 'model_verbosity="high"' in caller
-    assert 'model="gpt-5.6-sol"' in operator
-    assert 'model_reasoning_effort="xhigh"' in operator
+    assert 'model="gpt-6.2-sol"' in operator
+    assert 'model_reasoning_effort="high"' in operator
     assert 'model_reasoning_summary="detailed"' in operator
     assert 'model_verbosity="high"' in operator
 
@@ -29419,8 +29441,8 @@ def test_tui_restart_model_defaults_follow_entity_role() -> None:
     caller = app.restart_model_preset({}, None)
     operator = app.restart_model_preset({}, None, operator=True)
 
-    assert caller is not None and caller.key == "sol-5.6-high"
-    assert operator is not None and operator.key == "sol-5.6-xhigh"
+    assert caller is not None and caller.key == "sol-6.2-medium"
+    assert operator is not None and operator.key == "sol-6.2-high"
 
 
 def test_tui_review_operator_config_overrides_trusts_scratch_work_root() -> None:

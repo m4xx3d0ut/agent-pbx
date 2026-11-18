@@ -35,7 +35,7 @@ def test_prepare_demo_fixtures_creates_private_repositories_and_tools(
         capture_output=True,
         text=True,
     )
-    assert version.stdout.strip() == "codex-cli 0.159.3"
+    assert version.stdout.strip() == "codex-cli 0.169.0"
 
     workerbee = subprocess.run(
         [str(fixtures.workerbee_bin), "project", "status", "platform-console"],
