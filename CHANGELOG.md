@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## v2.6.0rc2 - 2026-11-18
+
+### Fixed
+
+- Require trusted provider provenance and current live-catalog evidence before
+  a familiar model slug can be classified as a managed qualified profile or
+  adopted into entity-local resume metadata.
+- Reclassify managed-looking choices from custom providers, stale or empty
+  catalogs, and unsupported live catalog entries as observational evidence
+  only. Even an active elevation lease cannot make those choices adoptable.
+- Revalidate provider and catalog evidence at adoption time so an observation
+  recorded before catalog invalidation cannot cross the managed policy
+  boundary later.
+- Canonicalize legacy Sol 5.6 elevation aliases when leases are requested and
+  when retained pre-v2.6 leases are matched to an observed runtime profile.
+
+### Qualification
+
+- Add focused provider-spoofing, catalog-invalidation, unsupported-selection,
+  elevated-adoption, and retained-lease compatibility coverage in response to
+  the independent RC1 policy review.
+- Keep the v2.6 database schema, role defaults, direct Codex `/model` picker,
+  WorkerBee policy, tmux topology, and migration behavior unchanged.
+
 ## v2.6.0rc1 - 2026-11-18
 
 ### Added
