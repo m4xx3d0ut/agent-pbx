@@ -21,16 +21,25 @@ def run_demo_codex(*args: str) -> subprocess.CompletedProcess[str]:
 def test_demo_codex_exposes_version_and_model_catalog() -> None:
     version = run_demo_codex("--version")
     assert version.returncode == 0
-    assert version.stdout.strip() == "codex-cli 0.159.3"
+    assert version.stdout.strip() == "codex-cli 0.169.0"
 
     catalog = run_demo_codex("debug", "models")
     assert catalog.returncode == 0
     models = json.loads(catalog.stdout)["models"]
     assert [item["slug"] for item in models] == [
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
+        "gpt-6-luna",
+        "gpt-6.1-terra",
     ]
-    assert models[0]["supportedReasoningLevels"] == ["high", "xhigh", "max"]
+    assert models[0]["supportedReasoningLevels"] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ]
 
 
 def test_demo_codex_supports_managed_mcp_configuration() -> None:
@@ -46,6 +55,6 @@ def test_demo_codex_supports_managed_mcp_configuration() -> None:
 
 
 def test_demo_codex_refuses_noninteractive_runtime_without_tty() -> None:
-    result = run_demo_codex("-c", 'model="gpt-5.6-sol"')
+    result = run_demo_codex("-c", 'model="gpt-6.2-sol"')
     assert result.returncode == 2
     assert "requires a TTY" in result.stderr

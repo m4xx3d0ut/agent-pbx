@@ -455,8 +455,8 @@ class DemoSession:
             "AGENT_PBX_SERVER_URL": self.server_url,
             "AGENT_PBX_TOKEN": self.token,
             "AGENT_PBX_MODE": "report",
-            "AGENT_PBX_CODEX_MODEL": "gpt-5.6-sol",
-            "AGENT_PBX_CODEX_REASONING_EFFORT": "xhigh",
+            "AGENT_PBX_CODEX_MODEL": "gpt-6.2-sol",
+            "AGENT_PBX_CODEX_REASONING_EFFORT": "high",
             "AGENT_PBX_DEMO_PROMPT": prompt,
         }
         command = [
@@ -513,7 +513,7 @@ class DemoSession:
                         "demo": True,
                         "managed_launch": True,
                         "launched_by": "agent-pbx-public-demo",
-                        "profile_id": "sol-xhigh",
+                        "profile_id": "sol-6.2-high",
                         "tmux_bin": self.config.tmux_bin,
                         "agent_type": "operator",
                         "operator_role": role,
@@ -536,7 +536,7 @@ class DemoSession:
             {
                 "project_path": str(self.fixtures.platform_project),
                 "agent_id": "platform-agent",
-                "profile_id": "sol-high",
+                "profile_id": "sol-6.2-medium",
                 "runtime_server_mode": "dedicated",
             },
             timeout=20,

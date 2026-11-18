@@ -293,7 +293,14 @@ def test_elevated_model_requires_distinct_approval_and_tracks_lease(
     assert finished.json()["transition"]["verified"] is True
 
 
-def test_current_elevations_are_limited_by_active_model_policy(tmp_path: Path) -> None:
+def test_current_elevations_are_limited_by_active_model_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "AGENT_PBX_CODEX_MODEL_ELEVATION_PROFILES",
+        "sol-6.2-max",
+    )
     root = tmp_path / "repo"
     root.mkdir()
     app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite", token="secret"))
@@ -320,7 +327,7 @@ def test_current_elevations_are_limited_by_active_model_policy(tmp_path: Path) -
         headers=headers,
         json={
             "agent_id": "agent-a",
-            "requested_profile": "astra-6.2-high",
+            "requested_profile": "astra-6.2-xhigh",
             "prior_profile": "sol-6.2-high",
             "justification": "Not allowed in the committed public matrix",
             "scope": "one_task",

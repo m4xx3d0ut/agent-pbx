@@ -798,7 +798,7 @@ agent-pbx uat operator-kb-flow --ci --server http://127.0.0.1:8765 --token dev-t
 agent-pbx uat operator-kb-flow --from-stage 6 --ci \
   --server http://127.0.0.1:8765 --token dev-token
 agent-pbx uat compare --run kb-sim-old --run kb-sim-new
-agent-pbx uat codex-operator-flow --codex-cli-version 0.158.0 --model gpt-5.6-sol
+agent-pbx uat codex-operator-flow --codex-cli-version 0.169.0 --model gpt-6.2-sol
 ```
 
 The tmux profile preflights server health, controlled cwd, tmux binary, and the

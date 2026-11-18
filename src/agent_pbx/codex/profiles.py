@@ -161,17 +161,6 @@ MANAGED_CODEX_PROFILE_ORDER: tuple[ManagedCodexProfile, ...] = (
         capability_requirements=("reasoning_ultra", "codex_subagents"),
     ),
     ManagedCodexProfile(
-        "astra-6.2-high",
-        "Astra 6.2 / high",
-        "gpt-6.2-astra",
-        "high",
-        "Explicit complex-work Astra profile.",
-        aliases=("gpt-6.2-astra-high",),
-        elevated=True,
-        approval_class="bounded",
-        role_hints=("elevation",),
-    ),
-    ManagedCodexProfile(
         "astra-6.2-xhigh",
         "Astra 6.2 / xhigh",
         "gpt-6.2-astra",

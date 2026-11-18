@@ -40,7 +40,7 @@ UAT_STAGE_DEPENDENCIES = {
     "9": {"0", "1", "2"},
 }
 CODEX_OPERATOR_FLOW_UAT_FORMAT = "agent-pbx-codex-operator-flow-matrix-v1"
-DEFAULT_CODEX_OPERATOR_FLOW_MODEL = "gpt-5.6-sol"
+DEFAULT_CODEX_OPERATOR_FLOW_MODEL = "gpt-6.2-sol"
 
 
 def codex_operator_flow_uat_matrix(

@@ -621,8 +621,8 @@ def build_parser() -> argparse.ArgumentParser:
         "codex-operator-flow",
         help="Print the Codex CLI/model operator spawn, fork, and review UAT matrix.",
     )
-    codex_operator_flow.add_argument("--model", default="gpt-5.6-sol")
-    codex_operator_flow.add_argument("--codex-cli-version", default="0.158.0")
+    codex_operator_flow.add_argument("--model", default="gpt-6.2-sol")
+    codex_operator_flow.add_argument("--codex-cli-version", default="0.169.0")
     codex_operator_flow.add_argument("--json", action="store_true")
     codex_operator_flow.add_argument("--output", type=Path, default=None)
     uat_cleanup = uat_subcommands.add_parser(

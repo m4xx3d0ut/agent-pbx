@@ -24,16 +24,23 @@ import urllib.error
 import urllib.request
 
 
-DEMO_VERSION = "0.159.3"
+DEMO_VERSION = "0.169.0"
 MODEL_CATALOG = {
     "models": [
         {
-            "slug": "gpt-5.6-sol",
-            "displayName": "Sol 5.6",
-            "defaultReasoningLevel": "high",
-            "supportedReasoningLevels": ["high", "xhigh", "max"],
-            "serviceTiers": ["default"],
-            "defaultServiceTier": "default",
+            "slug": "gpt-6.2-sol",
+            "displayName": "Sol 6.2",
+            "defaultReasoningLevel": "low",
+            "supportedReasoningLevels": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra",
+            ],
+            "serviceTiers": ["priority", "ultrafast"],
+            "defaultServiceTier": "priority",
             "visibility": "list",
             "shellType": "responses",
             "supportedInApi": True,
@@ -41,12 +48,52 @@ MODEL_CATALOG = {
             "defaultVerbosity": "high",
         },
         {
-            "slug": "gpt-5.6-terra",
-            "displayName": "Terra 5.6",
-            "defaultReasoningLevel": "xhigh",
-            "supportedReasoningLevels": ["xhigh", "max"],
-            "serviceTiers": ["default"],
-            "defaultServiceTier": "default",
+            "slug": "gpt-6.2-astra",
+            "displayName": "Astra 6.2",
+            "defaultReasoningLevel": "low",
+            "supportedReasoningLevels": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra",
+            ],
+            "serviceTiers": ["priority"],
+            "defaultServiceTier": "priority",
+            "visibility": "list",
+            "shellType": "responses",
+            "supportedInApi": True,
+            "supportVerbosity": True,
+            "defaultVerbosity": "high",
+        },
+        {
+            "slug": "gpt-6-luna",
+            "displayName": "Luna 6",
+            "defaultReasoningLevel": "medium",
+            "supportedReasoningLevels": ["low", "medium", "high", "xhigh", "max"],
+            "serviceTiers": ["priority"],
+            "defaultServiceTier": "priority",
+            "visibility": "list",
+            "shellType": "responses",
+            "supportedInApi": True,
+            "supportVerbosity": True,
+            "defaultVerbosity": "high",
+        },
+        {
+            "slug": "gpt-6.1-terra",
+            "displayName": "Terra 6.1",
+            "defaultReasoningLevel": "low",
+            "supportedReasoningLevels": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultra",
+            ],
+            "serviceTiers": ["priority"],
+            "defaultServiceTier": "priority",
             "visibility": "list",
             "shellType": "responses",
             "supportedInApi": True,
@@ -80,7 +127,7 @@ def _command_mode(argv: list[str]) -> int | None:
         return 0
     if argv and argv[0] == "doctor":
         print(
-            "Model  gpt-5.6-sol · high\n"
+            "Model  gpt-6.2-sol · medium\n"
             f"App-server version  {DEMO_VERSION}\n"
             f"Latest version  {DEMO_VERSION}\n"
             "Install method  Agent PBX demo fixture\n"
@@ -206,10 +253,10 @@ class DemoTerminal:
         self.agent_id = os.getenv("AGENT_PBX_AGENT_ID", "agent-pbx-demo")
         self.agent_type = os.getenv("AGENT_PBX_AGENT_TYPE", "caller")
         self.operator_role = os.getenv("AGENT_PBX_OPERATOR_ROLE", "")
-        self.model = os.getenv("AGENT_PBX_CODEX_MODEL", "gpt-5.6-sol")
+        self.model = os.getenv("AGENT_PBX_CODEX_MODEL", "gpt-6.2-sol")
         self.effort = os.getenv(
             "AGENT_PBX_CODEX_REASONING_EFFORT",
-            "xhigh" if self.agent_type == "operator" else "high",
+            "high" if self.agent_type == "operator" else "medium",
         )
         self.input = ""
         self.last_prompt = os.getenv(

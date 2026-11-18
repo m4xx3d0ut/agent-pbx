@@ -267,20 +267,20 @@ def test_demo_session_starts_real_isolated_server_and_runtime() -> None:
         platform_capture = _wait_for_pane_text(
             session,
             str(mappings_by_id["platform-agent"]["pane_id"]),
-            "Agent · gpt-5.6-sol/high",
+            "Agent · gpt-6.2-sol/medium",
         )
         assert "platform-agent" in platform_capture
         root_capture = _wait_for_pane_text(
             session,
             str(mappings_by_id["operator-0"]["pane_id"]),
-            "Root Operator · gpt-5.6-sol/xhigh",
+            "Root Operator · gpt-6.2-sol/high",
         )
         assert "operator-0" in root_capture
         for fork_id in DEMO_NATIVE_TERMINAL_ENTITY_IDS[2:]:
             fork_capture = _wait_for_pane_text(
                 session,
                 str(mappings_by_id[fork_id]["pane_id"]),
-                "Operator fork · gpt-5.6-sol/xhigh",
+                "Operator fork · gpt-6.2-sol/high",
             )
             assert fork_id in fork_capture
 

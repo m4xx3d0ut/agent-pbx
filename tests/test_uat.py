@@ -116,7 +116,7 @@ def test_codex_operator_flow_uat_markdown_renders_matrix() -> None:
 
     assert "# Codex Operator Flow UAT Matrix" in rendered
     assert "root-operator-spawn" in rendered
-    assert "gpt-5.6-sol" in rendered
+    assert "gpt-6.2-sol" in rendered
 
 
 def test_operator_kb_flow_manifest_only_lists_created_agents(
