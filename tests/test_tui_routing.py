@@ -19,8 +19,8 @@ from agent_pbx.ui.command_catalog import (
 
 
 def test_reviewed_command_and_button_catalogs_are_exact_and_unique() -> None:
-    assert len(REVIEWED_COMMAND_TITLES) == 215
-    assert len(set(REVIEWED_COMMAND_TITLES)) == 215
+    assert len(REVIEWED_COMMAND_TITLES) == 226
+    assert len(set(REVIEWED_COMMAND_TITLES)) == 226
     assert len(KNOWN_BUTTON_IDS) == 123
     assert "send" in KNOWN_BUTTON_IDS
     assert "purge-agent" in KNOWN_BUTTON_IDS

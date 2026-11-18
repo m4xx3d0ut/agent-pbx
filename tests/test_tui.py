@@ -14633,8 +14633,8 @@ async def test_managed_project_picker_dismisses_before_selecting_launched_agent(
 
 async def test_tui_codex_model_selector_displays_sol_postures() -> None:
     app = AgentPBXTUI(server="http://127.0.0.1:8765")
-    sol_xhigh = codex_model_preset_for("sol-xhigh")
-    sol_max = codex_model_preset_for("sol-max")
+    sol_xhigh = codex_model_preset_for("sol-6.2-xhigh")
+    sol_max = codex_model_preset_for("sol-6.2-max")
 
     assert sol_xhigh is not None
     assert sol_max is not None
@@ -14645,16 +14645,16 @@ async def test_tui_codex_model_selector_displays_sol_postures() -> None:
         status = app.query_one("#codex-model-status", Static)
 
         app.set_codex_model_preset_selector(sol_xhigh)
-        assert selector.value == "sol-5.6-xhigh"
+        assert selector.value == "sol-6.2-xhigh"
         assert (
-            "Model preset: sol-5.6/xhigh -> gpt-5.6-sol/xhigh, verbosity high, "
+            "Model preset: Sol 6.2 / xhigh -> gpt-6.2-sol/xhigh, verbosity high, "
             "reasoning summary detailed."
         ) in str(status.renderable)
 
         app.set_codex_model_preset_selector(sol_max)
-        assert selector.value == "sol-5.6-max"
+        assert selector.value == "sol-6.2-max"
         assert (
-            "Model preset: sol-5.6/max -> gpt-5.6-sol/max, verbosity high, "
+            "Model preset: Sol 6.2 / max -> gpt-6.2-sol/max, verbosity high, "
             "reasoning summary detailed."
         ) in str(status.renderable)
 
@@ -32031,3 +32031,21 @@ async def test_tui_opens_native_codex_keymap_in_selected_tmux_session() -> None:
 
     assert opened is True
     assert sent == [("operator-0", "/keymap")]
+
+
+async def test_tui_opens_native_codex_model_picker_in_selected_tmux_session() -> None:
+    sent: list[tuple[str, str]] = []
+    app = AgentPBXTUI(server="http://127.0.0.1:8765", tmux_direct=True)
+    app.selected_agent_id = "operator-0"
+    app.tmux_direct_agent_modes["operator-0"] = True
+
+    async def fake_send(agent_id: str, message: str) -> bool:
+        sent.append((agent_id, message))
+        return True
+
+    app.send_text_to_tmux = fake_send  # type: ignore[method-assign]
+
+    opened = await app.open_native_codex_model_picker()
+
+    assert opened is True
+    assert sent == [("operator-0", "/model")]

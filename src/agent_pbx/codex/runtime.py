@@ -7,6 +7,7 @@ import threading
 import time
 from typing import Any, Mapping
 
+from ..codex_cli import inspect_codex_model_catalog
 from ..contracts import (
     CapabilitySupport,
     CodexRuntimeState,
@@ -17,6 +18,7 @@ from ..contracts import (
 from ..store import Store
 from .adapter import CodexSessionAdapter
 from .models import CodexChildRuntime, CodexProfile
+from .policy import classify_codex_model_selection, load_codex_model_policy
 
 
 RUNTIME_SNAPSHOT_API_VERSION = "agent-pbx.codex-runtime/v2"
@@ -39,6 +41,7 @@ CHILD_SOURCE_PRIORITY = {
 
 PROTOCOL_METHODS = {
     "thread/started",
+    "thread/settings/updated",
     "thread/status/changed",
     "thread/tokenUsage/updated",
     "turn/started",
@@ -102,8 +105,12 @@ class CodexRuntimeService:
     intentionally excluded from both snapshots and the PBX event journal.
     """
 
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, *, catalog_loader: Any = None) -> None:
         self.store = store
+        self.catalog_loader = catalog_loader or inspect_codex_model_catalog
+        self.model_policy = load_codex_model_policy()
+        self._model_catalog: tuple[Any, ...] = ()
+        self._model_catalog_loaded_at = 0.0
         self._records: dict[str, RuntimeRecord] = {}
         self._lock = threading.RLock()
         self._branch_cache: dict[str, tuple[float, str | None]] = {}
@@ -450,6 +457,14 @@ class CodexRuntimeService:
                 verbosity=str(profile.get("verbosity") or ""),
                 reasoning_summary=str(profile.get("reasoning_summary") or ""),
                 service_tier=str(profile.get("service_tier") or "") or None,
+                model_provider=str(profile.get("model_provider") or "") or None,
+                selection_class=str(profile.get("selection_class") or "") or None,
+                managed_profile_id=str(profile.get("managed_profile_id") or "")
+                or None,
+                requires_approval=bool(profile.get("requires_approval", False)),
+                policy_allowed=bool(profile.get("policy_allowed", True)),
+                observation_source=str(profile.get("observation_source") or "")
+                or None,
             )
         context = snapshot.get("context")
         if isinstance(context, dict):
@@ -478,25 +493,102 @@ class CodexRuntimeService:
         method: str,
         params: Mapping[str, Any],
     ) -> bool:
-        if method != "thread/started":
+        if method == "thread/started":
+            thread = params.get("thread")
+            if not isinstance(thread, Mapping):
+                return False
+            model = clean_public_value(thread.get("model"), 160)
+            if not model:
+                return False
+            effort = clean_public_value(thread.get("reasoningEffort"), 80) or ""
+            model_provider = clean_public_value(thread.get("modelProvider"), 120) or ""
+            self._set_observed_profile(
+                record,
+                model=model,
+                reasoning_effort=effort,
+                model_provider=model_provider,
+                service_tier=None,
+                reasoning_summary=None,
+                source="thread_read",
+            )
+            return True
+        if method != "thread/settings/updated":
             return False
-        thread = params.get("thread")
-        if not isinstance(thread, Mapping):
+        settings = params.get("threadSettings")
+        if not isinstance(settings, Mapping):
             return False
-        model = clean_public_value(thread.get("model"), 160)
+        model = clean_public_value(settings.get("model"), 160)
         if not model:
             return False
-        effort = clean_public_value(thread.get("reasoningEffort"), 80) or ""
-        prior = record.profile
-        record.profile = CodexProfile(
-            profile_id=prior.profile_id if prior else "observed",
+        self._set_observed_profile(
+            record,
             model=model,
-            reasoning_effort=effort,
-            verbosity=prior.verbosity if prior else "",
-            reasoning_summary=prior.reasoning_summary if prior else "",
-            service_tier=prior.service_tier if prior else None,
+            reasoning_effort=(
+                clean_public_value(settings.get("effort"), 80) or ""
+            ),
+            model_provider=(
+                clean_public_value(settings.get("modelProvider"), 120) or ""
+            ),
+            service_tier=clean_public_value(settings.get("serviceTier"), 80),
+            reasoning_summary=clean_public_value(settings.get("summary"), 80),
+            source="thread_settings_updated",
         )
         return True
+
+    def _set_observed_profile(
+        self,
+        record: RuntimeRecord,
+        *,
+        model: str,
+        reasoning_effort: str,
+        model_provider: str,
+        service_tier: str | None,
+        reasoning_summary: str | None,
+        source: str,
+    ) -> None:
+        selection = classify_codex_model_selection(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            model_provider=model_provider,
+            catalog=self._catalog(),
+            policy=self.model_policy,
+        )
+        prior = record.profile
+        profile_id = selection.managed_profile_id or (
+            f"catalog:{model}:{reasoning_effort or 'default'}"
+        )
+        record.profile = CodexProfile(
+            profile_id=profile_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            verbosity=prior.verbosity if prior else "",
+            reasoning_summary=(
+                reasoning_summary
+                if reasoning_summary is not None
+                else (prior.reasoning_summary if prior else "")
+            ),
+            service_tier=(
+                service_tier
+                if service_tier is not None
+                else (prior.service_tier if prior else None)
+            ),
+            model_provider=model_provider or (prior.model_provider if prior else None),
+            selection_class=selection.classification.value,
+            managed_profile_id=selection.managed_profile_id,
+            requires_approval=selection.requires_approval,
+            policy_allowed=selection.allowed,
+            observation_source=source,
+        )
+
+    def _catalog(self) -> tuple[Any, ...]:
+        now = time.monotonic()
+        if now - self._model_catalog_loaded_at > 300.0:
+            try:
+                self._model_catalog = tuple(self.catalog_loader())
+            except Exception:  # noqa: BLE001 - classification degrades to stale.
+                self._model_catalog = ()
+            self._model_catalog_loaded_at = now
+        return self._model_catalog
 
     def _apply_context(
         self,
@@ -840,7 +932,15 @@ def profile_from_agent(agent: Mapping[str, Any]) -> CodexProfile | None:
 
 def safe_event_detail(method: str, params: Mapping[str, Any]) -> dict[str, object]:
     detail: dict[str, object] = {"method": method}
-    if method == "thread/status/changed":
+    if method == "thread/settings/updated":
+        settings = params.get("threadSettings")
+        if isinstance(settings, Mapping):
+            detail["threadSettings"] = {
+                key: value
+                for key in ("model", "modelProvider", "effort", "summary", "serviceTier")
+                if (value := clean_public_value(settings.get(key), 160))
+            }
+    elif method == "thread/status/changed":
         status = params.get("status")
         if isinstance(status, Mapping):
             detail["status"] = {
@@ -917,6 +1017,12 @@ def profile_dict(profile: CodexProfile | None) -> dict[str, Any] | None:
         "verbosity": profile.verbosity,
         "reasoning_summary": profile.reasoning_summary,
         "service_tier": profile.service_tier,
+        "model_provider": profile.model_provider,
+        "selection_class": profile.selection_class,
+        "managed_profile_id": profile.managed_profile_id,
+        "requires_approval": profile.requires_approval,
+        "policy_allowed": profile.policy_allowed,
+        "observation_source": profile.observation_source,
     }
 
 

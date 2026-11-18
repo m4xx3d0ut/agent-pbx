@@ -11,6 +11,7 @@ import pytest
 
 from agent_pbx.api import create_app
 from agent_pbx.codex.runtime import CodexRuntimeService
+from agent_pbx.codex_cli import CodexModelOption
 from agent_pbx.config import ServerConfig
 from agent_pbx.contracts import CodexRuntimeState
 from agent_pbx.ui.runtime import (
@@ -272,6 +273,94 @@ def runtime_client(tmp_path: Path) -> tuple[TestClient, object]:
     )
     assert response.status_code == 200
     return client, app
+
+
+def direct_model_catalog() -> tuple[CodexModelOption, ...]:
+    return (
+        CodexModelOption(
+            slug="gpt-6.2-sol",
+            display_name="Sol 6.2",
+            default_reasoning_level="medium",
+            supported_reasoning_levels=("low", "medium", "high", "xhigh", "max", "ultra"),
+            service_tiers=("fast", "ultrafast"),
+            default_service_tier="",
+            visibility="list",
+            shell_type="shell",
+            supported_in_api=True,
+            supports_verbosity=True,
+            default_verbosity="high",
+        ),
+    )
+
+
+def test_runtime_direct_model_choice_can_be_adopted_per_entity(tmp_path: Path) -> None:
+    client, app = runtime_client(tmp_path)
+    app.state.codex_runtime.catalog_loader = direct_model_catalog
+    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+
+    observed = client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "thread/settings/updated",
+            "params": {
+                "threadId": "thread-root",
+                "threadSettings": {
+                    "model": "gpt-6.2-sol",
+                    "modelProvider": "openai",
+                    "effort": "low",
+                    "summary": "detailed",
+                },
+            },
+        },
+    )
+    assert observed.status_code == 200
+    assert observed.json()["profile"]["selection_class"] == "catalog_observed"
+
+    adopted = client.post(
+        "/v2/agents/agent-a/codex-runtime/adopt-model",
+        headers=HEADERS,
+    )
+    assert adopted.status_code == 200
+    assert adopted.json()["profile_id"] == "catalog:gpt-6.2-sol:low"
+    metadata = app.state.store.get_agent("agent-a")["metadata"]
+    assert metadata["codex_model_preset"] == "catalog:gpt-6.2-sol:low"
+    assert metadata["codex_model"] == "gpt-6.2-sol"
+    assert metadata["codex_model_reasoning_effort"] == "low"
+
+
+def test_runtime_direct_elevation_cannot_be_adopted_without_lease(
+    tmp_path: Path,
+) -> None:
+    client, app = runtime_client(tmp_path)
+    app.state.codex_runtime.catalog_loader = direct_model_catalog
+    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+    observed = client.post(
+        "/v2/agents/agent-a/codex-runtime/events",
+        headers=HEADERS,
+        json={
+            "thread_id": "thread-root",
+            "method": "thread/settings/updated",
+            "params": {
+                "threadId": "thread-root",
+                "threadSettings": {
+                    "model": "gpt-6.2-sol",
+                    "modelProvider": "openai",
+                    "effort": "max",
+                },
+            },
+        },
+    )
+    assert observed.status_code == 200
+    assert observed.json()["profile"]["requires_approval"] is True
+
+    adopted = client.post(
+        "/v2/agents/agent-a/codex-runtime/adopt-model",
+        headers=HEADERS,
+    )
+    assert adopted.status_code == 409
+    assert "elevation lease" in adopted.json()["detail"]
 
 
 def test_runtime_endpoint_rejects_unrelated_thread(tmp_path: Path) -> None:

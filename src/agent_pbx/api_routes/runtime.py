@@ -159,6 +159,93 @@ def register_runtime_routes(
             raise HTTPException(status_code=404, detail="agent not registered") from exc
 
     @app.post(
+        "/v2/agents/{agent_id}/codex-runtime/adopt-model",
+        dependencies=[Depends(require_token)],
+    )
+    async def adopt_agent_codex_runtime_model(
+        agent_id: str,
+        request: Request,
+        store: Any = Depends(get_store),
+    ) -> dict[str, object]:
+        """Adopt one observed direct ``/model`` choice for this PBX entity.
+
+        This updates entity-local resume metadata only. It never changes the
+        committed profile registry, workstation role defaults, or global Codex
+        configuration.
+        """
+
+        try:
+            snapshot = await asyncio.to_thread(
+                request.app.state.codex_runtime.snapshot,
+                agent_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="agent not registered") from exc
+        profile = snapshot.get("profile")
+        if not isinstance(profile, dict):
+            raise HTTPException(status_code=409, detail="runtime model is not observed")
+        selection_class = str(profile.get("selection_class") or "")
+        if selection_class not in {"managed_qualified", "catalog_observed"}:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "only a current managed or live-catalog Codex selection can "
+                    "be adopted"
+                ),
+            )
+        if profile.get("policy_allowed") is False or profile.get("requires_approval"):
+            raise HTTPException(
+                status_code=409,
+                detail="the observed model requires a bounded elevation lease",
+            )
+        model = str(profile.get("model") or "").strip()
+        effort = str(profile.get("reasoning_effort") or "").strip()
+        if not model or not effort:
+            raise HTTPException(
+                status_code=409,
+                detail="runtime model and reasoning effort must both be observed",
+            )
+        managed_profile_id = str(profile.get("managed_profile_id") or "").strip()
+        adopted_profile_id = managed_profile_id or f"catalog:{model}:{effort}"
+        updates = {
+            "codex_model_preset": adopted_profile_id,
+            "codex_model_label": f"{model} / {effort}",
+            "codex_model": model,
+            "codex_model_reasoning_effort": effort,
+            "codex_model_verbosity": str(profile.get("verbosity") or "high"),
+            "codex_model_reasoning_summary": str(
+                profile.get("reasoning_summary") or "detailed"
+            ),
+            "codex_model_service_tier": str(profile.get("service_tier") or ""),
+            "codex_model_provider": str(profile.get("model_provider") or ""),
+            "codex_model_selection_class": selection_class,
+            "codex_model_adopted_at": time.time(),
+        }
+        updated = await asyncio.to_thread(
+            store.merge_agent_metadata,
+            agent_id,
+            updates,
+            event_type="codex_runtime_model_adopted",
+            event_payload={
+                "profile_id": adopted_profile_id,
+                "model": model,
+                "reasoning_effort": effort,
+                "selection_class": selection_class,
+            },
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="agent not registered")
+        await asyncio.to_thread(store.merge_operator_fork_metadata, agent_id, updates)
+        return {
+            "agent_id": agent_id,
+            "profile_id": adopted_profile_id,
+            "model": model,
+            "reasoning_effort": effort,
+            "selection_class": selection_class,
+            "scope": "entity_local_resume",
+        }
+
+    @app.post(
         "/v2/agents/{agent_id}/codex-runtime/events",
         dependencies=[Depends(require_token)],
     )
@@ -290,6 +377,18 @@ def register_runtime_routes(
         if profile is None or not profile.elevated:
             raise HTTPException(
                 status_code=400, detail="requested profile is not elevated"
+            )
+        model_policy = load_codex_model_policy()
+        if (
+            not profile.migration_only
+            and profile.profile_id not in model_policy.elevation_profile_ids
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"elevation profile {profile.profile_id!r} is not allowed by "
+                    "the active Agent PBX model policy"
+                ),
             )
         try:
             lease, created = store.request_or_reuse_model_elevation(

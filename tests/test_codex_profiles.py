@@ -8,6 +8,7 @@ import pytest
 from agent_pbx.api import create_app
 from agent_pbx.codex.profiles import (
     MANAGED_CODEX_PROFILES,
+    managed_profile_from_metadata,
     portable_codex_keymap_overrides,
     validate_managed_profile,
 )
@@ -29,6 +30,25 @@ def model(slug: str, *levels: str) -> CodexModelOption:
         supported_in_api=True,
         supports_verbosity=True,
     )
+
+
+def test_catalog_adopted_profile_recovers_from_entity_metadata() -> None:
+    profile = managed_profile_from_metadata(
+        {
+            "codex_model_preset": "catalog:gpt-6.2-sol:low",
+            "codex_model_label": "Sol 6.2 / low",
+            "codex_model": "gpt-6.2-sol",
+            "codex_model_reasoning_effort": "low",
+            "codex_model_verbosity": "high",
+            "codex_model_reasoning_summary": "detailed",
+        }
+    )
+
+    assert profile is not None
+    assert profile.profile_id == "catalog:gpt-6.2-sol:low"
+    assert profile.model == "gpt-6.2-sol"
+    assert profile.reasoning_effort == "low"
+    assert profile.elevated is False
 
 
 def register(client: TestClient, root: Path, *, agent_id: str = "agent-a") -> None:
@@ -271,6 +291,43 @@ def test_elevated_model_requires_distinct_approval_and_tracks_lease(
     )
     assert finished.status_code == 200
     assert finished.json()["transition"]["verified"] is True
+
+
+def test_current_elevations_are_limited_by_active_model_policy(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite", token="secret"))
+    client = TestClient(app)
+    register(client, root)
+    headers = {"Authorization": "Bearer secret"}
+
+    allowed = client.post(
+        "/v2/codex/elevations",
+        headers=headers,
+        json={
+            "agent_id": "agent-a",
+            "requested_profile": "sol-6.2-max",
+            "prior_profile": "sol-6.2-high",
+            "justification": "Bounded difficult task",
+            "scope": "one_task",
+        },
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["requested_profile"] == "sol-6.2-max"
+
+    blocked = client.post(
+        "/v2/codex/elevations",
+        headers=headers,
+        json={
+            "agent_id": "agent-a",
+            "requested_profile": "astra-6.2-high",
+            "prior_profile": "sol-6.2-high",
+            "justification": "Not allowed in the committed public matrix",
+            "scope": "one_task",
+        },
+    )
+    assert blocked.status_code == 403
+    assert "active Agent PBX model policy" in blocked.json()["detail"]
 
 
 def test_elevated_model_request_reuses_open_lease(tmp_path: Path) -> None:

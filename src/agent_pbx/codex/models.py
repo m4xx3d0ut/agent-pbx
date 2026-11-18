@@ -14,6 +14,12 @@ class CodexProfile:
     verbosity: str
     reasoning_summary: str
     service_tier: str | None = None
+    model_provider: str | None = None
+    selection_class: str | None = None
+    managed_profile_id: str | None = None
+    requires_approval: bool = False
+    policy_allowed: bool = True
+    observation_source: str | None = None
 
 
 @dataclass(frozen=True)

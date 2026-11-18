@@ -426,6 +426,7 @@ class CodexAppServerEventBridge:
         self._stop = asyncio.Event()
         self._client: AppServerJsonlClient | AppServerWebSocketClient | None = None
         self._targets_by_thread: dict[str, BridgeTarget] = {}
+        self._root_profile_hydrated: set[str] = set()
         self._fingerprints: OrderedDict[str, None] = OrderedDict()
         self._status: dict[str, Any] = {
             "enabled": enabled,
@@ -488,6 +489,7 @@ class CodexAppServerEventBridge:
                 try:
                     client, selected_transport = await self._connect()
                     self._client = client
+                    self._root_profile_hydrated.clear()
                     self._status.update(
                         connected=True,
                         transport=selected_transport,
@@ -525,6 +527,9 @@ class CodexAppServerEventBridge:
         self._targets_by_thread = {target.thread_id: target for target in targets}
         self._status["target_count"] = len(targets)
         self._status["ambiguous_session_count"] = ambiguous
+        for target in targets:
+            if target.thread_id not in self._root_profile_hydrated:
+                await self._read_root_profile(client, target)
         rows = await self._list_subagent_threads(client)
         associated = associate_child_threads(rows, self._targets_by_thread)
         self._status["child_count"] = len(associated)
@@ -538,6 +543,45 @@ class CodexAppServerEventBridge:
             if target is not None:
                 await self._read_recent_child_items(client, target)
         self._status["last_reconcile_at"] = time.time()
+
+    async def _read_root_profile(self, client: Any, target: BridgeTarget) -> None:
+        """Hydrate the current model from the exact persisted root thread."""
+
+        try:
+            result = await client.request(
+                "thread/read",
+                {"threadId": target.thread_id, "includeTurns": False},
+            )
+        except AppServerRequestError:
+            return
+        thread = result.get("thread")
+        if not isinstance(thread, Mapping):
+            return
+        safe_thread = {
+            key: value
+            for key, limit in (
+                ("id", 240),
+                ("model", 160),
+                ("modelProvider", 120),
+                ("reasoningEffort", 80),
+            )
+            if (value := public_text(thread.get(key), limit))
+        }
+        if safe_thread.get("id") != target.thread_id or not safe_thread.get("model"):
+            return
+        try:
+            await asyncio.to_thread(
+                self.runtime.observe_protocol,
+                target.agent_id,
+                thread_id=target.thread_id,
+                method="thread/started",
+                params={"thread": safe_thread},
+                observed_at=time.time(),
+            )
+        except (KeyError, ValueError):
+            return
+        self._root_profile_hydrated.add(target.thread_id)
+        self._status["observed_updates"] += 1
 
     async def _connect(self) -> tuple[Any, str]:
         candidates: list[tuple[str, object]] = []
@@ -780,6 +824,31 @@ class CodexAppServerEventBridge:
         method: str,
         params: dict[str, Any],
     ) -> None:
+        if method == "thread/settings/updated":
+            thread_id = public_text(params.get("threadId"), 240)
+            target = self._targets_by_thread.get(thread_id or "")
+            settings = safe_thread_settings(params.get("threadSettings"))
+            if target is None or settings is None:
+                return
+            fingerprint = child_fingerprint(method, target.agent_id, settings)
+            if not self._remember(fingerprint):
+                return
+            try:
+                await asyncio.to_thread(
+                    self.runtime.observe_protocol,
+                    target.agent_id,
+                    thread_id=target.thread_id,
+                    method=method,
+                    params={
+                        "threadId": target.thread_id,
+                        "threadSettings": settings,
+                    },
+                    observed_at=time.time(),
+                )
+            except (KeyError, ValueError):
+                return
+            self._status["observed_updates"] += 1
+            return
         if method not in {"item/started", "item/completed"}:
             return
         thread_id = public_text(params.get("threadId"), 240)
@@ -898,6 +967,23 @@ def safe_child_item(raw: object) -> dict[str, Any] | None:
             safe_states[child_id] = {"status": status or ""}
         item["agentsStates"] = safe_states
     return item
+
+
+def safe_thread_settings(raw: object) -> dict[str, str] | None:
+    if not isinstance(raw, Mapping):
+        return None
+    settings = {
+        key: value
+        for key, limit in (
+            ("model", 160),
+            ("modelProvider", 120),
+            ("effort", 80),
+            ("summary", 80),
+            ("serviceTier", 80),
+        )
+        if (value := public_text(raw.get(key), limit))
+    }
+    return settings if settings.get("model") else None
 
 
 def child_fingerprint(kind: str, agent_id: str, payload: Mapping[str, Any]) -> str:

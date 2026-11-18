@@ -315,7 +315,8 @@ def managed_profile_from_metadata(
 
     if not isinstance(metadata, Mapping):
         return None
-    profile = managed_profile_for(metadata.get("codex_model_preset"))
+    raw_profile_id = str(metadata.get("codex_model_preset") or "").strip()
+    profile = managed_profile_for(raw_profile_id)
     if profile is not None:
         return profile
     model = str(metadata.get("codex_model") or "").strip()
@@ -323,6 +324,20 @@ def managed_profile_from_metadata(
     summary = str(metadata.get("codex_model_reasoning_summary") or "").strip()
     verbosity = str(metadata.get("codex_model_verbosity") or "").strip()
     service_tier = str(metadata.get("codex_model_service_tier") or "").strip()
+    if raw_profile_id.startswith("catalog:") and model and effort:
+        return ManagedCodexProfile(
+            profile_id=raw_profile_id,
+            label=str(metadata.get("codex_model_label") or f"{model} / {effort}"),
+            model=model,
+            reasoning_effort=effort,
+            description="Session-local Codex catalog choice adopted by Agent PBX.",
+            verbosity=verbosity or "high",
+            reasoning_summary=summary or "detailed",
+            service_tier=service_tier,
+            elevated=effort in {"max", "ultra"},
+            approval_class=("bounded_catalog" if effort in {"max", "ultra"} else "none"),
+            execution_mode=("delegated" if effort == "ultra" else "single_agent"),
+        )
     for candidate in MANAGED_CODEX_PROFILE_ORDER:
         if candidate.model != model or candidate.reasoning_effort != effort:
             continue

@@ -813,16 +813,27 @@ BUILT_IN_PALETTE_COMMAND_NAMES = {
     "/codex mcp wire",
     "/codex update",
     "/codex model",
+    "/codex model adopt",
+    "/codex model inspect",
+    "/codex model native",
     "/codex model plan",
+    "/codex model return",
     "/codex model cleanup plan",
     "/codex model terra-max",
     "/codex model terra-xhigh",
     "/codex model sol-max",
+    "/codex model sol-medium",
+    "/codex model sol-ultra",
     "/codex model sol-xhigh",
+    "/codex model astra-xhigh",
+    "/codex model astra-max",
+    "/codex model astra-ultra",
+    "/codex model luna-high",
     "/codex model legacy-5.5",
     "/codex model default terra-max",
     "/codex model default terra-xhigh",
     "/codex model default sol-max",
+    "/codex model default sol-medium",
     "/codex model default sol-xhigh",
     "/codex model default legacy-5.5",
     "/tmux",
@@ -5285,6 +5296,30 @@ class AgentPBXTUI(App[None]):
                 f"{verbosity}{reasoning_summary}. "
                 f"{preset.description}"
             ]
+            snapshot = self.codex_runtime_by_agent.get(target)
+            observed = (
+                snapshot.get("profile")
+                if isinstance(snapshot, Mapping)
+                and isinstance(snapshot.get("profile"), Mapping)
+                else None
+            )
+            if isinstance(observed, Mapping) and observed.get("selection_class"):
+                lines.append(
+                    "Observed runtime: "
+                    f"{observed.get('model') or '-'} / "
+                    f"{observed.get('reasoning_effort') or 'default'} · "
+                    f"{observed.get('selection_class')}"
+                    + (
+                        f" · {observed.get('observation_source')}"
+                        if observed.get("observation_source")
+                        else ""
+                    )
+                )
+                if observed.get("policy_allowed") is False:
+                    lines.append(
+                        "Policy: this direct Codex choice needs a bounded PBX "
+                        "elevation lease before it is policy-compliant."
+                    )
             lease = self.model_elevation_by_agent.get(target)
             if isinstance(lease, dict):
                 lease_status = str(lease.get("status") or "unknown")
@@ -5308,9 +5343,11 @@ class AgentPBXTUI(App[None]):
 
     @staticmethod
     def elevation_profile_id(preset: CodexModelPreset) -> str | None:
-        if preset.key == "sol-5.6-max":
-            return "sol-max"
-        return None
+        if not preset.elevated:
+            return None
+        # Preserve the original durable lease key while old 5.6 sessions are
+        # being migrated; all current profiles use their exact versioned id.
+        return "sol-max" if preset.key == "sol-5.6-max" else preset.profile_id
 
     def runtime_profile_match(
         self,
@@ -5387,6 +5424,44 @@ class AgentPBXTUI(App[None]):
         if cache:
             self.codex_runtime_by_agent[agent_id] = payload
         return payload
+
+    async def inspect_direct_codex_model_selection(self) -> bool:
+        agent_id = self.codex_model_target_agent_id()
+        if agent_id is None:
+            return False
+        try:
+            await self.fetch_codex_runtime_snapshot(agent_id)
+        except Exception as exc:
+            self.notify(f"Unable to inspect the live Codex model: {exc}", severity="error")
+            return False
+        self.activate_agent_tab("codex-tab")
+        self.update_codex_model_status()
+        return True
+
+    async def adopt_direct_codex_model_selection(self) -> bool:
+        agent_id = self.codex_model_target_agent_id()
+        if agent_id is None:
+            return False
+        try:
+            await self.fetch_codex_runtime_snapshot(agent_id)
+            response = await self.api_client().post(
+                f"/v2/agents/{quote(agent_id, safe='')}/codex-runtime/adopt-model",
+                headers=auth_headers(self.token),
+                timeout=8,
+            )
+            response.raise_for_status()
+            adopted = response.json()
+        except Exception as exc:
+            self.notify(f"Unable to adopt the live Codex model: {exc}", severity="error")
+            return False
+        await self.refresh_agents()
+        self.notify(
+            f"Adopted {adopted.get('model')}/{adopted.get('reasoning_effort')} "
+            f"for {agent_id} resume only; shared defaults were not changed."
+        )
+        self.activate_agent_tab("codex-tab")
+        self.update_codex_model_status()
+        return True
 
     async def request_codex_model_restart(
         self,
@@ -5664,7 +5739,7 @@ class AgentPBXTUI(App[None]):
                 "/v2/codex/elevations",
                 json={
                     "agent_id": agent_id,
-                    "requested_profile": "sol-max",
+                    "requested_profile": self.elevation_profile_id(preset),
                     "prior_profile": prior_profile,
                     "justification": justification,
                     "scope": "one_task",
@@ -5688,7 +5763,7 @@ class AgentPBXTUI(App[None]):
                 lease = decided.json()
                 lease_status = str(lease.get("status") or "")
         except Exception as exc:
-            self.notify(f"Sol max approval failed: {exc}", severity="error")
+            self.notify(f"{preset.label} approval failed: {exc}", severity="error")
             return
         if lease_status == "active":
             self.model_elevation_by_agent[agent_id] = lease
@@ -5713,7 +5788,8 @@ class AgentPBXTUI(App[None]):
             )
             return
         self.notify(
-            f"Approved bounded Sol max elevation for {agent_id}; restarting at the safe boundary."
+            f"Approved bounded {preset.label} elevation for {agent_id}; "
+            "restarting at the safe boundary."
         )
         await self.restart_tmux_codex_session(
             agent_id,
@@ -5747,7 +5823,8 @@ class AgentPBXTUI(App[None]):
             return None
         if (
             str(lease.get("agent_id") or "") != agent_id
-            or str(lease.get("requested_profile") or "") != "sol-max"
+            or str(lease.get("requested_profile") or "")
+            != self.elevation_profile_id(preset)
             or str(lease.get("status") or "") != "active"
             or bool(lease.get("expired"))
         ):
@@ -6145,9 +6222,15 @@ class AgentPBXTUI(App[None]):
         await self.save_codex_model_preset_as_default(self.selected_codex_model_preset())
 
     async def save_codex_model_preset_as_default(self, preset: CodexModelPreset) -> None:
-        if preset.elevated:
+        if preset.elevated or preset.migration_only:
             self.notify(
-                "Sol max is a bounded elevation and cannot be saved as the global default.",
+                f"{preset.label} is "
+                + (
+                    "a bounded elevation"
+                    if preset.elevated
+                    else "a migration-only compatibility profile"
+                )
+                + " and cannot be saved as the global default.",
                 severity="warning",
             )
             return
@@ -6516,6 +6599,22 @@ class AgentPBXTUI(App[None]):
         if not await self.send_text_to_tmux(agent_id, "/subagents"):
             self.notify(
                 "Unable to send /subagents to the selected Codex pane.",
+                severity="error",
+            )
+            return False
+        return True
+
+    async def open_native_codex_model_picker(self) -> bool:
+        agent_id = str(self.selected_agent_id or "").strip()
+        if not agent_id or not self.is_tmux_direct_enabled(agent_id):
+            self.notify(
+                "Select a tmux-direct Agent or Operator before opening Codex /model.",
+                severity="warning",
+            )
+            return False
+        if not await self.send_text_to_tmux(agent_id, "/model"):
+            self.notify(
+                "Unable to send /model to the selected Codex pane.",
                 severity="error",
             )
             return False
@@ -8225,6 +8324,39 @@ class AgentPBXTUI(App[None]):
     def palette_codex_model(self) -> None:
         self.activate_agent_tab("codex-tab")
         self.update_codex_model_status(self.selected_codex_model_preset())
+
+    def palette_codex_model_native(self) -> None:
+        self.run_worker(
+            self.open_native_codex_model_picker(),
+            name="codex-native-model-picker",
+            exclusive=True,
+        )
+
+    def palette_codex_model_inspect(self) -> None:
+        self.run_worker(
+            self.inspect_direct_codex_model_selection(),
+            name="codex-model-inspect",
+            exclusive=True,
+        )
+
+    def palette_codex_model_adopt(self) -> None:
+        self.run_worker(
+            self.adopt_direct_codex_model_selection(),
+            name="codex-model-adopt",
+            exclusive=True,
+        )
+
+    def palette_codex_model_return(self) -> None:
+        agent_id = self.codex_model_target_agent_id()
+        if agent_id is None:
+            return
+        preset = self.default_codex_model_preset_for_agent(agent_id)
+        self.set_codex_model_preset_selector(preset)
+        self.run_worker(
+            self.request_codex_model_restart(agent_id, preset),
+            name=f"codex-model-return-{slugify(agent_id)}",
+            exclusive=True,
+        )
 
     def palette_codex_model_plan(self) -> None:
         self.run_worker(
@@ -18790,7 +18922,7 @@ class AgentPBXTUI(App[None]):
             return False
         if model_preset is not None and model_preset.elevated and not model_elevation_lease_id:
             self.notify(
-                "Sol max requires explicit user approval and a justification.",
+                f"{model_preset.label} requires explicit user approval and a justification.",
                 severity="warning",
             )
             return False

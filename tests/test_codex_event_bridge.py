@@ -18,7 +18,9 @@ from agent_pbx.codex.event_bridge import (
     CodexAppServerEventBridge,
     associate_child_threads,
     safe_child_item,
+    safe_thread_settings,
 )
+from agent_pbx.codex_cli import CodexModelOption
 from agent_pbx.codex.runtime import CodexRuntimeService
 from agent_pbx.config import ServerConfig
 from agent_pbx.schemas import AgentRegisterRequest
@@ -44,6 +46,15 @@ class FakeAppServerClient:
         self.calls.append((method, dict(params)))
         if method == "thread/list":
             return {"data": list(self.threads), "nextCursor": None}
+        if method == "thread/read":
+            return {
+                "thread": {
+                    "id": str(params["threadId"]),
+                    "model": "gpt-6.2-sol",
+                    "modelProvider": "openai",
+                    "reasoningEffort": "high",
+                }
+            }
         if method == "thread/items/list":
             return {
                 "data": list(self.items_by_thread.get(str(params["threadId"]), [])),
@@ -65,7 +76,24 @@ def registered_runtime(tmp_path: Path) -> tuple[Store, CodexRuntimeService]:
             },
         )
     )
-    return store, CodexRuntimeService(store)
+    return store, CodexRuntimeService(
+        store,
+        catalog_loader=lambda: (
+            CodexModelOption(
+                slug="gpt-6.2-sol",
+                display_name="Sol 6.2",
+                default_reasoning_level="high",
+                supported_reasoning_levels=("medium", "high", "xhigh", "max", "ultra"),
+                service_tiers=("fast", "ultrafast"),
+                default_service_tier="",
+                visibility="list",
+                shell_type="shell",
+                supported_in_api=True,
+                supports_verbosity=True,
+                default_verbosity="high",
+            ),
+        ),
+    )
 
 
 def child_thread(
@@ -96,6 +124,71 @@ def child_thread(
         "path": "/private/rollout.jsonl",
         "createdAt": 100.0,
         "updatedAt": 110.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_bridge_hydrates_root_model_and_observes_direct_model_updates(
+    tmp_path: Path,
+) -> None:
+    store, runtime = registered_runtime(tmp_path)
+    client = FakeAppServerClient(threads=[])
+    bridge = CodexAppServerEventBridge(store, runtime, transport="sidecar")
+
+    await bridge.reconcile_once(client)  # type: ignore[arg-type]
+    hydrated = runtime.snapshot("agent-a")["profile"]
+    assert hydrated["model"] == "gpt-6.2-sol"
+    assert hydrated["reasoning_effort"] == "high"
+    assert hydrated["selection_class"] == "managed_qualified"
+    assert hydrated["managed_profile_id"] == "sol-6.2-high"
+    assert hydrated["observation_source"] == "thread_read"
+
+    await bridge._handle_notification(
+        "thread/settings/updated",
+        {
+            "threadId": "thread-root",
+            "threadSettings": {
+                "model": "gpt-6.2-sol",
+                "modelProvider": "openai",
+                "effort": "max",
+                "summary": "detailed",
+                "serviceTier": "fast",
+                "sandboxPolicy": {"type": "dangerFullAccess"},
+                "approvalPolicy": "never",
+            },
+        },
+    )
+
+    updated = runtime.snapshot("agent-a")["profile"]
+    assert updated["managed_profile_id"] == "sol-6.2-max"
+    assert updated["requires_approval"] is True
+    assert updated["policy_allowed"] is False
+    assert updated["service_tier"] == "fast"
+    assert updated["observation_source"] == "thread_settings_updated"
+    serialized = json.dumps(
+        store.list_subject_events("agent-a", event_type="codex_runtime_observed")
+    )
+    assert "sandboxPolicy" not in serialized
+    assert "approvalPolicy" not in serialized
+
+
+def test_safe_thread_settings_keeps_only_public_model_fields() -> None:
+    assert safe_thread_settings(
+        {
+            "model": "gpt-6.2-astra",
+            "modelProvider": "openai",
+            "effort": "xhigh",
+            "summary": "detailed",
+            "serviceTier": "fast",
+            "cwd": "/private/repo",
+            "sandboxPolicy": {"type": "dangerFullAccess"},
+        }
+    ) == {
+        "model": "gpt-6.2-astra",
+        "modelProvider": "openai",
+        "effort": "xhigh",
+        "summary": "detailed",
+        "serviceTier": "fast",
     }
 
 
@@ -192,6 +285,7 @@ async def test_bridge_projects_exact_child_and_discards_private_fields(
     ):
         assert private_value not in serialized
     assert [method for method, _params in client.calls] == [
+        "thread/read",
         "thread/list",
         "thread/items/list",
         "thread/list",
@@ -199,9 +293,9 @@ async def test_bridge_projects_exact_child_and_discards_private_fields(
         "thread/list",
         "thread/items/list",
     ]
-    assert client.calls[0][1]["ancestorThreadId"] == "thread-root"
-    assert client.calls[2][1]["ancestorThreadId"] == "thread-root"
-    assert client.calls[4][1]["ancestorThreadId"] == "thread-root"
+    assert client.calls[1][1]["ancestorThreadId"] == "thread-root"
+    assert client.calls[3][1]["ancestorThreadId"] == "thread-root"
+    assert client.calls[5][1]["ancestorThreadId"] == "thread-root"
 
 
 @pytest.mark.asyncio
@@ -244,6 +338,15 @@ async def test_bridge_isolates_rejected_stale_target(tmp_path: Path) -> None:
             params: dict[str, Any],
         ) -> dict[str, Any]:
             self.calls.append((method, dict(params)))
+            if method == "thread/read":
+                return {
+                    "thread": {
+                        "id": str(params["threadId"]),
+                        "model": "gpt-6.2-sol",
+                        "modelProvider": "openai",
+                        "reasoningEffort": "high",
+                    }
+                }
             if (
                 method == "thread/list"
                 and params.get("ancestorThreadId") == "uat-session-stale"
