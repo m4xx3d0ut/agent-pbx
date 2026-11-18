@@ -10,11 +10,14 @@ import re
 import sys
 import time
 import traceback
-from typing import Iterator, TextIO
+from typing import Any, Callable, Iterator, TextIO
 from urllib.parse import urlparse
 import uuid
 
+import httpx
+
 from .paths import default_state_root
+from .runtime_tmux import tmux_socket_from_environment
 
 
 TUI_RUNTIME_ROOT_ENV = "AGENT_PBX_TUI_RUNTIME_ROOT"
@@ -37,6 +40,58 @@ _QUERY_SECRET_PATTERN = re.compile(
 _LABELED_SECRET_PATTERN = re.compile(
     r"(?i)((?:token|access_token|api_key)\s*[:=]\s*[\"']?)([^\s\"']+)"
 )
+
+
+def managed_runtime_host_collision(
+    *,
+    server: str,
+    token: str | None,
+    tmux_environment: str | None = None,
+    tmux_pane: str | None = None,
+    get: Callable[..., Any] = httpx.get,
+) -> str | None:
+    """Return the mapped entity when a TUI host pane is a managed runtime.
+
+    Failure to inspect is intentionally non-fatal so ordinary connection
+    diagnostics still render when the daemon is unavailable. A positive exact
+    socket-and-pane match is sufficient to reject a recursive TUI launch.
+    """
+
+    pane_id = str(
+        tmux_pane if tmux_pane is not None else os.getenv("TMUX_PANE") or ""
+    ).strip()
+    socket_path = tmux_socket_from_environment(
+        tmux_environment if tmux_environment is not None else os.getenv("TMUX")
+    )
+    if not pane_id or socket_path is None:
+        return None
+    try:
+        response = get(
+            f"{str(server).rstrip('/')}/v2/tmux/runtimes",
+            headers={"Authorization": f"Bearer {token}"} if token else {},
+            timeout=2.0,
+        )
+        response.raise_for_status()
+        mappings = response.json()
+    except Exception:
+        return None
+    if not isinstance(mappings, list):
+        return None
+    expected_socket = socket_path.resolve(strict=False)
+    for item in mappings:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("pane_id") or "").strip() != pane_id:
+            continue
+        if str(item.get("state") or "").strip().lower() not in {"ready", "stopping"}:
+            continue
+        raw_socket = str(item.get("socket_path") or "").strip()
+        if not raw_socket:
+            continue
+        if Path(raw_socket).expanduser().resolve(strict=False) != expected_socket:
+            continue
+        return str(item.get("entity_id") or "managed runtime").strip()
+    return None
 
 
 def _bounded_env_int(
@@ -526,6 +581,18 @@ def run_tui_recorded(*, server: str, token: str | None = None) -> None:
 
     with record_tui_run(server=server, token=token):
         identity = ui_runtime.capture_interactive_tui_host_identity()
+        if identity is None:
+            raise RuntimeError(
+                "Agent PBX TUI requires an attached interactive terminal; "
+                "refusing an orphanable background launch"
+            )
+        collision = managed_runtime_host_collision(server=server, token=token)
+        if collision is not None:
+            raise RuntimeError(
+                "Agent PBX TUI cannot start inside managed runtime pane "
+                f"{os.getenv('TMUX_PANE') or '?'} ({collision}); launch it from "
+                "an outer host tmux pane"
+            )
         ui_runtime.run_tui_with_host_watchdog(
             AgentPBXTUI(
                 server=server,

@@ -12,6 +12,7 @@ from agent_pbx.tui_runtime import (
     TUI_RUNTIME_ROOT_ENV,
     TuiRunRecorder,
     _process_start_ticks,
+    managed_runtime_host_collision,
     run_tui_recorded,
 )
 
@@ -64,6 +65,14 @@ def test_run_tui_persists_redacted_exception_and_stderr(
 
     monkeypatch.setenv(TUI_RUNTIME_ROOT_ENV, str(tmp_path))
     monkeypatch.setattr("agent_pbx.tui.AgentPBXTUI", FakeApp)
+    monkeypatch.setattr(
+        "agent_pbx.ui.runtime.capture_interactive_tui_host_identity",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "agent_pbx.tui_runtime.managed_runtime_host_collision",
+        lambda **_kwargs: None,
+    )
 
     with pytest.raises(RuntimeError, match="failed with bearer"):
         run_tui_recorded(server="http://127.0.0.1:8765", token=token)
@@ -107,6 +116,64 @@ def test_recorded_tui_launch_uses_host_watchdog(
 
     assert len(launched) == 1
     assert launched[0].host_terminal_identity is identity
+
+
+def test_managed_runtime_host_collision_requires_exact_socket_and_pane(
+    tmp_path: Path,
+) -> None:
+    socket_path = tmp_path / "runtime.sock"
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "entity_id": "codex-agent-pbx",
+                    "state": "ready",
+                    "socket_path": str(socket_path),
+                    "pane_id": "%94",
+                },
+                {
+                    "entity_id": "other",
+                    "state": "ready",
+                    "socket_path": str(tmp_path / "other.sock"),
+                    "pane_id": "%100",
+                },
+            ]
+
+    def get(*_args: object, **_kwargs: object) -> Response:
+        return Response()
+
+    assert managed_runtime_host_collision(
+        server="http://127.0.0.1:8767",
+        token="secret",
+        tmux_environment=f"{socket_path},123,0",
+        tmux_pane="%94",
+        get=get,
+    ) == "codex-agent-pbx"
+    assert managed_runtime_host_collision(
+        server="http://127.0.0.1:8767",
+        token="secret",
+        tmux_environment=f"{socket_path},123,0",
+        tmux_pane="%100",
+        get=get,
+    ) is None
+
+
+def test_recorded_tui_rejects_noninteractive_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(TUI_RUNTIME_ROOT_ENV, str(tmp_path))
+    monkeypatch.setattr(
+        "agent_pbx.ui.runtime.capture_interactive_tui_host_identity",
+        lambda: None,
+    )
+
+    with pytest.raises(RuntimeError, match="attached interactive terminal"):
+        run_tui_recorded(server="http://127.0.0.1:8765", token="secret")
 
 
 def test_tui_run_recorder_preserves_stale_marker_as_unclean_evidence(
