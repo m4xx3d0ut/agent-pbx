@@ -28023,8 +28023,8 @@ def test_tui_workerbee_bootstrap_policy_covers_all_operator_roles() -> None:
             item for item in overrides if item.startswith("mcp_servers.workerbee=")
         )
         assert "workerbee_v1_capabilities" in workerbee_config, role
-        assert "workerbee_v1_session_start" in workerbee_config, role
         assert "workerbee_v1_k1s_profile_evidence" in workerbee_config, role
+        assert "workerbee_v1_session_start" not in workerbee_config, role
         assert "workerbee_v1_workload_restart" not in workerbee_config, role
         assert "workerbee_v1_manifest_deploy_local" not in workerbee_config, role
         assert "workerbee_v1_exec" not in workerbee_config, role
@@ -28150,12 +28150,27 @@ def test_tui_caller_local_deploy_profile_is_bounded() -> None:
     assert "workerbee_v1_manifest_validate" in workerbee_config
     assert "workerbee_v1_manifest_deploy_local" in workerbee_config
     assert "workerbee_v1_workload_restart" in workerbee_config
-    assert "workerbee_v1_ingress_route_apply" in workerbee_config
+    assert "workerbee_v1_ingress_route_apply" not in workerbee_config
     assert "workerbee_v1_ingress_probe" in workerbee_config
     assert "workerbee_v1_manifest_deploy_remote_k1s" not in workerbee_config
     assert "workerbee_v1_ingress_ca_regenerate" not in workerbee_config
     assert "workerbee_v1_exec" not in workerbee_config
     assert caller_workerbee_mcp_config_overrides("unknown") == []
+
+
+def test_tui_caller_trusted_workbench_profile_uses_reviewed_registry() -> None:
+    overrides = caller_workerbee_mcp_config_overrides(
+        "trusted-workbench",
+        server_configs={"workerbee": {"url": "http://127.0.0.1:8765/mcp"}},
+    )
+
+    assert len(overrides) == 1
+    workerbee_config = overrides[0]
+    assert "workerbee_v1_session_start" in workerbee_config
+    assert "workerbee_v1_exec" in workerbee_config
+    assert "workerbee_v1_bundle_export" in workerbee_config
+    assert "workerbee_v1_publish" not in workerbee_config
+    assert "workerbee_v1_manifest_deploy_remote_k1s" not in workerbee_config
 
 
 def test_tui_workerbee_gateway_binding_replaces_direct_transport_and_sets_env() -> None:

@@ -135,8 +135,8 @@ from .workerbee_gateway import (
 from .workerbee_modes import (
     WORKERBEE_ACCESS_PROFILES,
     WORKERBEE_PROFILE_RANK,
-    WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
     reviewed_tools_for_access_profile,
+    tools_for_access_profile,
 )
 from .workerbee_profile import (
     WORKERBEE_PROFILE_CEILING_METADATA_KEY,
@@ -549,29 +549,8 @@ CALLER_AGENT_PBX_APPROVED_TOOLS = (
     "pbx_joplin_status",
     "pbx_joplin_create_document",
 )
-CALLER_WORKERBEE_LOCAL_DEPLOY_PROFILE = "local-deploy"
 WORKERBEE_WORKSPACE_BINDING_METADATA_KEY = "workerbee_workspace_binding_id"
 WORKERBEE_GATEWAY_LEASE_METADATA_KEY = "workerbee_gateway_lease_id"
-CALLER_WORKERBEE_LOCAL_DEPLOY_APPROVED_TOOLS = (
-    "workerbee_v1_capabilities",
-    WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
-    "workerbee_v1_session_start",
-    "workerbee_v1_project_runbook_status",
-    "workerbee_v1_project_status",
-    "workerbee_v1_secret_policy_status",
-    "workerbee_v1_profile_workload_status",
-    "workerbee_v1_edge_link_status",
-    "workerbee_v1_logs",
-    "workerbee_v1_image_build",
-    "workerbee_v1_manifest_prepare",
-    "workerbee_v1_manifest_validate",
-    "workerbee_v1_manifest_deploy_local",
-    "workerbee_v1_workload_restart",
-    "workerbee_v1_ingress_status",
-    "workerbee_v1_ingress_route_apply",
-    "workerbee_v1_ingress_probe",
-    "workerbee_v1_security_review_project",
-)
 REVIEW_OPERATOR_MCP_APPROVED_TOOLS = {
     "agent-pbx": REVIEW_OPERATOR_AGENT_PBX_APPROVED_TOOLS,
     "workerbee": REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS,
@@ -1978,8 +1957,10 @@ def caller_workerbee_mcp_config_overrides(
 
     normalized_profile = str(profile or "").strip().lower()
     if normalized_profile not in {
+        WORKERBEE_PROFILE_REVIEW,
         WORKERBEE_PROFILE_OBSERVE,
-        CALLER_WORKERBEE_LOCAL_DEPLOY_PROFILE,
+        WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
     }:
         return []
 
@@ -2011,11 +1992,7 @@ def caller_workerbee_mcp_config_overrides(
     transport_config["enabled_tools"] = list(
         workerbee_gateway_launch_tools(gateway_binding)
         if gateway_binding
-        else (
-            CALLER_WORKERBEE_LOCAL_DEPLOY_APPROVED_TOOLS
-            if normalized_profile == CALLER_WORKERBEE_LOCAL_DEPLOY_PROFILE
-            else REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS
-        )
+        else tools_for_access_profile(normalized_profile)
     )
     transport_config["default_tools_approval_mode"] = "approve"
     return [
