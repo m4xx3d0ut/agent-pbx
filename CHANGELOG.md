@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+## v2.5.0 - 2026-11-18
+
+### Highlights
+
+- Promote the complete v2.5 runtime-reconciliation and component-boundary
+  cycle after RC4 passed local qualification, Linux and macOS on Python 3.10
+  and 3.12, TestPyPI Trusted Publishing, registry-hash verification, and clean
+  installation from the public test index.
+- Add independently governed WorkerBee Operator profiles, path-domain evidence,
+  exact readiness-bound terminal delivery, caller rehydration, explicit direct
+  caller campaigns, explainable Operator workflow projection, and MCP tool
+  inventory freshness.
+- Preserve the native managed-tmux experience while hardening disposable TUI
+  host liveness, writer leases, process identity refresh, recursive-launch
+  rejection, and cross-platform run-marker recovery.
+
+### Changed
+
+- Decompose API, Textual presentation, persistence, WorkerBee projection, and
+  restart preparation behind typed ownership boundaries with executable
+  dependency, growth, OpenAPI, route, Store, schema, and TUI compatibility
+  contracts.
+- Advance the additive database contract from schema 45 to schema 46 for
+  explicit campaign-delivery topology. Existing assignments retain the prior
+  `operator_fork` behavior.
+- Correlate observed Codex children with native `/subagents` identifiers while
+  keeping runtime availability separate from durable completion evidence.
+
+### Security
+
+- Keep terminal delivery exact-target, input-ready, writer-lease-bound, and
+  independent from durable report history. Prompt bodies and terminal content
+  remain excluded from delivery audit records.
+- Keep WorkerBee backend, access profile, gateway lease, filesystem, Git,
+  provider, deployment, publication, and credential authority independently
+  governed; discovery and reconciliation cannot raise a configured ceiling.
+- Keep caller rehydration, direct-caller campaigns, runtime restart, and TUI
+  ownership fail closed across stale identities, ambiguous sessions, invalid
+  roots, recursive attachment, and mismatched capability evidence.
+
+Stable 2.5.0 is derived from the qualified RC4 product tree by release identity
+and documentation only. No semantic production change was added after RC4.
+
 ## v2.5.0rc4 - 2026-11-18
 
 ### Added
