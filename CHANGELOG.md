@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## v2.5.0rc4 - 2026-11-17
+## v2.5.0rc4 - 2026-11-18
 
 ### Added
 
@@ -35,6 +35,17 @@
 - Mark a proven MCP manifest mismatch as restart-required. Pre-RC4 sessions
   without launch provenance are reported as unknown with a restart
   recommendation, never as a proven mismatch.
+- Derive the WorkerBee launch inventory from the effective access profile and
+  reconcile platform-debug appliance discovery into stable profile/tool
+  projections. Platform cloud tools are classified for all appliance-capable
+  profiles, while `workerbee_v1_exec` remains restricted to the trusted
+  workbench profile.
+- Reconcile a session's durable WorkerBee profile intent, active gateway lease,
+  backend generation, and live launch projection before restart. Stale leases
+  are revoked and replaced without broadening the configured profile ceiling.
+- Extract WorkerBee controller metadata, projection, lease reconciliation, and
+  restart preparation behind dedicated service boundaries while retaining the
+  existing API and persistence contracts.
 
 ### Security
 
@@ -47,6 +58,24 @@
 - Treat MCP inventory state as provenance rather than authority: it does not
   grant tools, restart sessions automatically, mutate live mappings, or infer
   that legacy sessions are stale without a recorded launch digest.
+- Reject recursive TUI launches when the parent terminal cannot remain alive to
+  own the disposable client, while allowing the explicitly isolated managed
+  web-demo stdio boundary.
+- Preserve profile ceilings during appliance-tool discovery and lease refresh;
+  runtime reconciliation cannot promote a caller or Operator beyond its
+  configured WorkerBee authority.
+
+### Fixed
+
+- Deliver direct-caller campaign prompts through the same exact managed-runtime,
+  process, session, workspace, input-readiness, and writer-lease contract used
+  by Operator targets.
+- Refresh PID and process-start identity after a managed pane restart so the
+  replacement runtime is not evaluated against stale process evidence.
+- Refresh WorkerBee authority immediately before caller restart so the resumed
+  Codex process receives the current backend generation, gateway lease, access
+  profile, and allowed tool inventory instead of a stale adoption-time launch
+  surface.
 
 ## v2.5.0rc3 - 2026-11-17
 

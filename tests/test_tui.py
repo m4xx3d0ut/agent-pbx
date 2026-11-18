@@ -19286,6 +19286,14 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
     def fake_respawn_pane(pane_id: str, **kwargs: object) -> None:
         respawns.append({"pane_id": pane_id, **kwargs})
 
+    async def fake_refresh_runtime_mapping(
+        agent_id: str,
+        pane_id: str,
+    ) -> bool:
+        assert agent_id == "operator-0"
+        assert pane_id == "%152"
+        return True
+
     def fake_list_panes(**_kwargs: object) -> list[tmux_support.TmuxPane]:
         assert _kwargs == {
             "tmux_bin": "/opt/tmux-3.7c",
@@ -19329,6 +19337,7 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
     app.ensure_operator_auth_ready = fake_auth_ready  # type: ignore[method-assign]
     app.configure_operator_codex_mcp = fake_configure_operator_codex_mcp  # type: ignore[method-assign]
     app.send_text_to_tmux_pane = fake_send_text_to_tmux_pane  # type: ignore[method-assign]
+    app.refresh_tmux_runtime_mapping_after_restart = fake_refresh_runtime_mapping  # type: ignore[method-assign]
     app.refresh_agents = fake_refresh_agents  # type: ignore[method-assign]
     app.open_latest_for_agent = fake_open_latest_for_agent  # type: ignore[method-assign]
     app.operator_session_candidates = fake_operator_session_candidates  # type: ignore[method-assign]
@@ -21312,11 +21321,20 @@ async def test_tui_fork_restart_replaces_stale_source_resume_with_codex_fork(
     def fake_respawn(target: str, **kwargs: object) -> None:
         respawns.append({"target": target, **kwargs})
 
+    async def fake_refresh_runtime_mapping(
+        agent_id: str,
+        pane_id: str,
+    ) -> bool:
+        assert agent_id == "operator-0-fork-caller-1"
+        assert pane_id == "%20"
+        return True
+
     app.notify = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     app.ensure_operator_auth_ready = fake_auth_ready  # type: ignore[method-assign]
     app.configure_operator_codex_mcp = fake_configure  # type: ignore[method-assign]
     app.linked_edit_fork_git_admin_plan = fake_git_admin_plan  # type: ignore[method-assign]
     app.record_operator_fork = fake_record_operator_fork  # type: ignore[method-assign]
+    app.refresh_tmux_runtime_mapping_after_restart = fake_refresh_runtime_mapping  # type: ignore[method-assign]
     app.operator_session_candidates = lambda _agent_id: [  # type: ignore[method-assign]
         OperatorSessionCandidate(
             session_id="source-session",
