@@ -230,6 +230,7 @@ class ManagedRuntimeService:
             "reasoning_effort": profile.reasoning_effort,
             "verbosity": profile.verbosity,
             "reasoning_summary": profile.reasoning_summary,
+            "service_tier": profile.service_tier,
             "runtime_server": identity.public_dict(),
             "session_name": session_name,
             "command": [
@@ -402,6 +403,7 @@ class ManagedRuntimeService:
             "reasoning_effort": profile.reasoning_effort,
             "verbosity": profile.verbosity,
             "reasoning_summary": profile.reasoning_summary,
+            "service_tier": profile.service_tier,
             "runtime_server": identity.public_dict(),
             "session_name": session_name,
             "command": [
@@ -499,6 +501,7 @@ class ManagedRuntimeService:
                 source_codex_session_id=source_codex_session_id,
                 workerbee_profile=workerbee_profile,
             )
+        profile = MANAGED_CODEX_PROFILES[str(preview["profile_id"])]
         identity_data = preview["runtime_server"]
         identity = TmuxServerIdentity(
             RuntimeServerMode(identity_data["requested_mode"]),
@@ -616,23 +619,18 @@ class ManagedRuntimeService:
                 "runtime_server_id": identity.server_id,
                 "runtime_server_mode": identity.effective_mode.value,
                 "codex_command": self.codex_bin,
-                "managed_profile_id": profile_id,
+                "managed_profile_id": profile.profile_id,
                 "model": preview["model"],
                 "model_reasoning_effort": preview["reasoning_effort"],
                 "model_verbosity": preview["verbosity"],
                 "model_reasoning_summary": preview["reasoning_summary"],
-                "codex_model_preset": {
-                    "sol-high": "sol-5.6-high",
-                    "sol-xhigh": "sol-5.6-xhigh",
-                    "sol-max": "sol-5.6-max",
-                    "terra-xhigh": "terra-5.6-xhigh",
-                    "terra-max": "terra-5.6-max",
-                    "codex-5.5-xhigh": "legacy-5.5-xhigh",
-                }.get(profile_id, profile_id),
+                "model_service_tier": preview["service_tier"],
+                "codex_model_preset": profile.profile_id,
                 "codex_model": preview["model"],
                 "codex_model_reasoning_effort": preview["reasoning_effort"],
                 "codex_model_verbosity": preview["verbosity"],
                 "codex_model_reasoning_summary": preview["reasoning_summary"],
+                "codex_model_service_tier": preview["service_tier"],
                 "managed_bootstrap_id": preview["bootstrap_id"],
                 "managed_bootstrap_version": preview["bootstrap_version"],
                 "managed_bootstrap_prompt_sha256": preview[
@@ -804,6 +802,7 @@ class ManagedRuntimeService:
             "reasoning_effort": metadata.get("model_reasoning_effort"),
             "verbosity": metadata.get("model_verbosity"),
             "reasoning_summary": metadata.get("model_reasoning_summary"),
+            "service_tier": metadata.get("model_service_tier"),
             "runtime_server": {
                 "effective_mode": mapping.get("server_mode"),
                 "server_id": mapping.get("server_id"),

@@ -274,7 +274,7 @@ class TmuxRuntimeMappingResponse(BaseModel):
 class ManagedAgentLaunchRequest(BaseModel):
     project_path: str = Field(min_length=1, max_length=4096)
     agent_id: str = Field(default="", max_length=120)
-    profile_id: str = Field(default="sol-high", min_length=1, max_length=120)
+    profile_id: str = Field(default="sol-6.2-medium", min_length=1, max_length=120)
     runtime_server_mode: Literal[
         "dedicated", "outer_if_present", "outer_required"
     ] = "dedicated"
@@ -285,7 +285,7 @@ class ManagedAgentLaunchRequest(BaseModel):
 class ManagedCallerRehydrateRequest(BaseModel):
     agent_id: str = Field(min_length=1, max_length=120)
     mode: Literal["fresh", "fork_source"] = "fresh"
-    profile_id: str = Field(default="sol-high", min_length=1, max_length=120)
+    profile_id: str = Field(default="sol-6.2-medium", min_length=1, max_length=120)
     runtime_server_mode: Literal[
         "dedicated", "outer_if_present", "outer_required"
     ] = "dedicated"

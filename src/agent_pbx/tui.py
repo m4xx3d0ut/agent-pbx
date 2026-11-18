@@ -80,7 +80,16 @@ from .codex_sessions import (
     latest_assistant_transcript_from_session_file,
     wait_for_codex_thread_writer_lock_release,
 )
-from .codex.profiles import portable_codex_keymap_overrides
+from .codex.profiles import (
+    DEFAULT_CALLER_PROFILE_ID,
+    DEFAULT_OPERATOR_PROFILE_ID,
+    MANAGED_CODEX_PROFILE_ORDER,
+    MANAGED_CODEX_PROFILES,
+    ManagedCodexProfile,
+    managed_profile_for,
+    managed_profile_from_metadata,
+    portable_codex_keymap_overrides,
+)
 from .git_worktree import (
     LinkedWorktreeGitAdminPlan,
     LinkedWorktreeQualificationError,
@@ -1025,113 +1034,14 @@ JOPLIN_SHORTCUT_HINT = (
 WidgetType = TypeVar("WidgetType")
 
 
-@dataclass(frozen=True)
-class CodexModelPreset:
-    key: str
-    label: str
-    model: str
-    reasoning_effort: str
-    description: str
-    reasoning_summary: str | None = None
-    verbosity: str | None = None
-    aliases: tuple[str, ...] = ()
-    eol: str = ""
-    recommended: bool = False
-    elevated: bool = False
-
-    @property
-    def display_label(self) -> str:
-        suffix = " recommended" if self.recommended else ""
-        eol = f" EOL {self.eol}" if self.eol else ""
-        return f"{self.label}{suffix}{eol}"
-
-    def metadata(self) -> dict[str, str]:
-        data = {
-            "codex_model_preset": self.key,
-            "codex_model_label": self.label,
-            "codex_model": self.model,
-            "codex_model_reasoning_effort": self.reasoning_effort,
-        }
-        if self.verbosity:
-            data["codex_model_verbosity"] = self.verbosity
-        if self.reasoning_summary:
-            data["codex_model_reasoning_summary"] = self.reasoning_summary
-        if self.eol:
-            data["codex_model_eol"] = self.eol
-        return data
-
-
-CODEX_MODEL_PRESETS: tuple[CodexModelPreset, ...] = (
-    CodexModelPreset(
-        key="legacy-5.5-xhigh",
-        label="codex-5.5/xhigh",
-        model="gpt-5.5",
-        reasoning_effort="xhigh",
-        description="Legacy Codex 5.5 posture; retires from Codex on 2026-10-14.",
-        aliases=("codex-5.5", "gpt-5.5", "5.5", "legacy", "codex55"),
-        eol="2026-10-14",
-    ),
-    CodexModelPreset(
-        key="terra-5.6-xhigh",
-        label="terra-5.6/xhigh",
-        model="gpt-5.6-terra",
-        reasoning_effort="xhigh",
-        description="Terra 5.6 with xhigh reasoning for continuity from 5.5/xhigh.",
-        reasoning_summary="detailed",
-        verbosity="high",
-        aliases=("terra-xhigh", "terra", "gpt-5.6-terra-xhigh"),
-    ),
-    CodexModelPreset(
-        key="terra-5.6-max",
-        label="terra-5.6/max",
-        model="gpt-5.6-terra",
-        reasoning_effort="max",
-        description="Case-specific Terra 5.6 option with maximum reasoning.",
-        reasoning_summary="detailed",
-        verbosity="high",
-        aliases=("terra-max", "terra5.6-max", "gpt-5.6-terra-max"),
-    ),
-    CodexModelPreset(
-        key="sol-5.6-high",
-        label="sol-5.6/high",
-        model="gpt-5.6-sol",
-        reasoning_effort="high",
-        description="Default caller Agent profile with balanced reasoning depth.",
-        reasoning_summary="detailed",
-        verbosity="high",
-        aliases=("sol-high", "sol5.6-high", "gpt-5.6-sol-high"),
-        recommended=True,
-    ),
-    CodexModelPreset(
-        key="sol-5.6-xhigh",
-        label="sol-5.6/xhigh",
-        model="gpt-5.6-sol",
-        reasoning_effort="xhigh",
-        description="Default Operator profile with xhigh reasoning.",
-        reasoning_summary="detailed",
-        verbosity="high",
-        aliases=("sol-xhigh", "sol", "gpt-5.6-sol-xhigh"),
-    ),
-    CodexModelPreset(
-        key="sol-5.6-max",
-        label="sol-5.6/max",
-        model="gpt-5.6-sol",
-        reasoning_effort="max",
-        description="Higher-intelligence Sol 5.6 option with max reasoning.",
-        reasoning_summary="detailed",
-        verbosity="high",
-        aliases=("sol-max", "sol5.6-max", "gpt-5.6-sol-max"),
-        elevated=True,
-    ),
-)
-CODEX_MODEL_PRESET_BY_KEY = {preset.key: preset for preset in CODEX_MODEL_PRESETS}
-CODEX_MODEL_PRESET_ALIASES = {
-    alias.casefold(): preset
-    for preset in CODEX_MODEL_PRESETS
-    for alias in (preset.key, preset.label, *preset.aliases)
+CodexModelPreset = ManagedCodexProfile
+CODEX_MODEL_PRESETS = MANAGED_CODEX_PROFILE_ORDER
+CODEX_MODEL_PRESET_BY_KEY = {
+    profile.profile_id: profile for profile in MANAGED_CODEX_PROFILE_ORDER
 }
-DEFAULT_CALLER_MODEL_PRESET_KEY = "sol-5.6-high"
-DEFAULT_OPERATOR_MODEL_PRESET_KEY = "sol-5.6-xhigh"
+CODEX_MODEL_PRESET_ALIASES = MANAGED_CODEX_PROFILES
+DEFAULT_CALLER_MODEL_PRESET_KEY = DEFAULT_CALLER_PROFILE_ID
+DEFAULT_OPERATOR_MODEL_PRESET_KEY = DEFAULT_OPERATOR_PROFILE_ID
 
 
 @dataclass
@@ -2289,34 +2199,14 @@ def codex_terminal_config_overrides(mode: object) -> list[str]:
 
 
 def codex_model_preset_for(value: object) -> CodexModelPreset | None:
-    key = str(value or "").strip().casefold()
-    if not key:
-        return None
-    return CODEX_MODEL_PRESET_ALIASES.get(key)
+    return managed_profile_for(value)
 
 
 def codex_model_preset_from_metadata(
     metadata: Mapping[str, Any] | None,
 ) -> CodexModelPreset | None:
     """Recover the last selected harness preset without trusting free-form text."""
-    if not isinstance(metadata, Mapping):
-        return None
-    preset = codex_model_preset_for(metadata.get("codex_model_preset"))
-    if preset is not None:
-        return preset
-    model = str(metadata.get("codex_model") or "").strip()
-    effort = str(metadata.get("codex_model_reasoning_effort") or "").strip()
-    summary = str(metadata.get("codex_model_reasoning_summary") or "").strip()
-    verbosity = str(metadata.get("codex_model_verbosity") or "").strip()
-    for candidate in CODEX_MODEL_PRESETS:
-        if candidate.model != model or candidate.reasoning_effort != effort:
-            continue
-        if summary and candidate.reasoning_summary != summary:
-            continue
-        if candidate.verbosity and candidate.verbosity != verbosity:
-            continue
-        return candidate
-    return None
+    return managed_profile_from_metadata(metadata)
 
 
 def codex_model_preset_config_overrides(
@@ -2329,6 +2219,7 @@ def codex_model_preset_config_overrides(
         reasoning_effort=preset.reasoning_effort,
         reasoning_summary=preset.reasoning_summary,
         verbosity=preset.verbosity,
+        service_tier=preset.service_tier,
     )
 
 
@@ -5320,9 +5211,9 @@ class AgentPBXTUI(App[None]):
         target_id = str(agent_id or self.selected_agent_id or "").strip()
         agent = self.agents.get(target_id) or {}
         key = (
-            "sol-5.6-xhigh"
+            DEFAULT_OPERATOR_MODEL_PRESET_KEY
             if self.agent_type(agent) == OPERATOR_AGENT_TYPE
-            else "sol-5.6-high"
+            else DEFAULT_CALLER_MODEL_PRESET_KEY
         )
         return CODEX_MODEL_PRESET_BY_KEY[key]
 
@@ -7035,14 +6926,17 @@ class AgentPBXTUI(App[None]):
                             )
                     with TabPane("Codex", id="codex-tab"):
                         yield Static("Codex config: checking...", id="codex-config-status")
-                        yield Static("Model preset: Sol 5.6/high Agent default", id="codex-model-status")
+                        yield Static(
+                            "Model preset: Sol 6.2/medium Agent default",
+                            id="codex-model-status",
+                        )
                         with Horizontal(id="codex-model-actions"):
                             yield Select(
                                 [
                                     (preset.display_label, preset.key)
                                     for preset in CODEX_MODEL_PRESETS
                                 ],
-                                value="sol-5.6-high",
+                                value=DEFAULT_CALLER_MODEL_PRESET_KEY,
                                 allow_blank=False,
                                 id="codex-model-preset",
                             )

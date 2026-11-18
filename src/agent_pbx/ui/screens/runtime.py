@@ -10,6 +10,10 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Select, Static
 
+from ...codex.profiles import (
+    DEFAULT_CALLER_PROFILE_ID,
+    MANAGED_CODEX_PROFILE_ORDER,
+)
 from ..preferences import TMUX_RUNTIME_SERVER_MODE_CHOICES
 
 
@@ -44,13 +48,12 @@ class ManagedProjectPickerScreen(ModalScreen[None]):
                 id="managed-launch-mode",
             )
             yield Select(
-                (
-                    ("Sol 5.6 / high", "sol-high"),
-                    ("Sol 5.6 / xhigh", "sol-xhigh"),
-                    ("Terra 5.6 / xhigh", "terra-xhigh"),
-                    ("Terra 5.6 / max", "terra-max"),
+                tuple(
+                    (profile.label, profile.profile_id)
+                    for profile in MANAGED_CODEX_PROFILE_ORDER
+                    if not profile.elevated and not profile.migration_only
                 ),
-                value="sol-high",
+                value=DEFAULT_CALLER_PROFILE_ID,
                 allow_blank=False,
                 id="managed-agent-profile",
             )

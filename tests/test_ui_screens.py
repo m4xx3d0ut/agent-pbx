@@ -837,7 +837,7 @@ async def test_extracted_managed_project_picker_preserves_launch_order_and_paylo
         assert screen.selected_owners == ["agent-next"]
         screen.query_one("#managed-agent-id", Input).value = "agent-demo"
         screen.query_one("#managed-launch-mode", Select).value = "agent_operator"
-        screen.query_one("#managed-agent-profile", Select).value = "sol-xhigh"
+        screen.query_one("#managed-agent-profile", Select).value = "sol-6.2-xhigh"
 
         screen.query_one("#managed-project-launch", Button).press()
         await pilot.pause()
@@ -846,7 +846,7 @@ async def test_extracted_managed_project_picker_preserves_launch_order_and_paylo
         {
             "project_path": "/tmp/next",
             "agent_id": "agent-demo",
-            "profile_id": "sol-xhigh",
+            "profile_id": "sol-6.2-xhigh",
             "runtime_server_mode": "dedicated",
             "launch_mode": "agent_operator",
             "existing_owner_ids": ["agent-next"],

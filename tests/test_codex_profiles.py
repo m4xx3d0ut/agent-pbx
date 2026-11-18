@@ -129,6 +129,10 @@ def test_profiles_and_managed_skills_api(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "agent_pbx.api.inspect_codex_model_catalog",
         lambda: (
+            model("gpt-6.2-sol", "medium", "high", "xhigh", "max", "ultra"),
+            model("gpt-6.2-astra", "high", "xhigh", "max", "ultra"),
+            model("gpt-6-luna", "high", "xhigh", "max"),
+            model("gpt-6.1-terra", "high", "xhigh", "max", "ultra"),
             model("gpt-5.6-sol", "high", "xhigh", "max"),
             model("gpt-5.6-terra", "xhigh", "max"),
         ),
@@ -143,11 +147,15 @@ def test_profiles_and_managed_skills_api(tmp_path: Path, monkeypatch) -> None:
         "/v2/codex/profiles", headers={"Authorization": "Bearer secret"}
     )
     assert profiles.status_code == 200
-    assert profiles.json()["default_profile"] == "sol-high"
+    assert profiles.json()["default_profile"] == "sol-6.2-medium"
     assert profiles.json()["role_defaults"] == {
-        "caller": "sol-high",
-        "operator": "sol-xhigh",
+        "caller": "sol-6.2-medium",
+        "operator": "sol-6.2-high",
     }
+    by_id = {item["profile_id"]: item for item in profiles.json()["profiles"]}
+    assert by_id["luna-6-high"]["available"] is True
+    assert by_id["sol-6.2-ultra"]["execution_mode"] == "delegated"
+    assert by_id["astra-6.2-xhigh"]["approval_class"] == "bounded"
     overlay_view = profiles.json()["personality"]["local_overlay"]
     assert overlay_view["active"] is True
     assert "private overlay contents" not in profiles.text

@@ -53,7 +53,7 @@ def service(store: Store, root: Path) -> ManagedRuntimeService:
         codex_bin="/usr/bin/codex-test",
         tmux_bin="tmux-test",
         catalog_loader=lambda _command: (
-            model("gpt-5.6-sol", "high", "xhigh", "max"),
+            model("gpt-6.2-sol", "medium", "high", "xhigh", "max", "ultra"),
         ),
     )
 
@@ -75,7 +75,7 @@ def test_project_discovery_and_launch_preview_are_git_scoped(tmp_path: Path) -> 
     assert [item["path"] for item in projects] == [str(repo)]
     preview = runtime.preview_launch(project_path=str(repo))
     assert preview["agent_id"] == "codex-demo"
-    assert preview["model"] == "gpt-5.6-sol"
+    assert preview["model"] == "gpt-6.2-sol"
     assert preview["runtime_server"]["effective_mode"] == "dedicated"
     assert preview["command"][0] == "/usr/bin/codex-test"
     assert preview["mcp_tool_manifest_sha256"] == manifest_digest
@@ -180,8 +180,8 @@ def test_managed_launch_atomically_registers_agent_and_mapping(
     assert any("AGENT_PBX_SOURCE_CODEX_SESSION_ID=source-session-1" in item for item in commands[0])
     assert any("AGENT_PBX_MANAGED_BOOTSTRAP_ID=" in item for item in commands[0])
     assert any("CODEX_NON_INTERACTIVE=1" in item for item in commands[0])
-    assert any("AGENT_PBX_CODEX_MODEL=gpt-5.6-sol" in item for item in commands[0])
-    assert any("AGENT_PBX_CODEX_REASONING_EFFORT=high" in item for item in commands[0])
+    assert any("AGENT_PBX_CODEX_MODEL=gpt-6.2-sol" in item for item in commands[0])
+    assert any("AGENT_PBX_CODEX_REASONING_EFFORT=medium" in item for item in commands[0])
     assert any("AGENT_PBX_CODEX_REASONING_SUMMARY=detailed" in item for item in commands[0])
     assert any("AGENT_PBX_CODEX_VERBOSITY=high" in item for item in commands[0])
     assert any(
@@ -435,7 +435,7 @@ def test_managed_launch_on_real_dedicated_tmux_server(
         codex_bin=str(fake_codex),
         tmux_bin=shutil.which("tmux") or "tmux",
         catalog_loader=lambda _command: (
-            model("gpt-5.6-sol", "high", "xhigh", "max"),
+            model("gpt-6.2-sol", "medium", "high", "xhigh", "max", "ultra"),
         ),
     )
 
@@ -573,7 +573,7 @@ def test_managed_runtime_api_discovers_projects_and_persists_migration(
     monkeypatch.setenv("AGENT_PBX_PROJECT_ROOTS", str(root))
     app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite", token="secret"))
     app.state.managed_runtime.catalog_loader = lambda _command: (
-        model("gpt-5.6-sol", "high", "xhigh", "max"),
+        model("gpt-6.2-sol", "medium", "high", "xhigh", "max", "ultra"),
     )
     client = TestClient(app)
     headers = {"Authorization": "Bearer secret"}
