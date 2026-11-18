@@ -1151,6 +1151,21 @@ class Store:
     def get_tmux_runtime_mapping(self, entity_id: str) -> dict[str, Any] | None:
         return self._runtime.get_mapping(entity_id)
 
+    def bind_managed_tmux_codex_session(
+        self,
+        entity_id: str,
+        *,
+        codex_session_id: str,
+        expected_pane_id: str,
+        expected_bootstrap_id: str,
+    ) -> dict[str, Any] | None:
+        return self._runtime.bind_managed_codex_session(
+            entity_id,
+            codex_session_id=codex_session_id,
+            expected_pane_id=expected_pane_id,
+            expected_bootstrap_id=expected_bootstrap_id,
+        )
+
     def list_tmux_runtime_mappings(self) -> list[dict[str, Any]]:
         return self._runtime.list_mappings()
 

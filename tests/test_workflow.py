@@ -193,6 +193,118 @@ def test_api_preserves_logical_project_during_path_refresh_and_report(
     assert any(event["type"] == "report_project_canonicalized" for event in events)
 
 
+def test_managed_caller_registration_binds_late_codex_session_to_mapping(
+    tmp_path: Path,
+) -> None:
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+    client = TestClient(app)
+    bootstrap_id = "managed-bootstrap-a"
+    registered = client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "managed-caller",
+            "project": "demo",
+            "metadata": {
+                "cwd": str(tmp_path),
+                "tmux_pane_id": "%19",
+                "managed_bootstrap_id": bootstrap_id,
+            },
+        },
+    )
+    assert registered.status_code == 200
+    app.state.store.upsert_tmux_runtime_mapping(
+        entity_id="managed-caller",
+        server_mode="dedicated",
+        server_id="server-a",
+        socket_path=str(tmp_path / "runtime.sock"),
+        session_name="managed-caller",
+        window_id="@19",
+        window_name="codex",
+        pane_id="%19",
+        pane_pid=919,
+        process_start_ticks=77,
+        cwd=str(tmp_path),
+        state="ready",
+        metadata={
+            "managed_launch": True,
+            "managed_rehydration": True,
+            "managed_bootstrap_id": bootstrap_id,
+        },
+    )
+
+    refreshed = client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "managed-caller",
+            "project": "demo",
+            "metadata": {
+                "cwd": str(tmp_path),
+                "tmux_pane_id": "%19",
+                "managed_bootstrap_id": bootstrap_id,
+                "codex_session_id": "session-new",
+            },
+        },
+    )
+
+    assert refreshed.status_code == 200
+    mapping = app.state.store.get_tmux_runtime_mapping("managed-caller")
+    assert mapping is not None
+    assert mapping["pane_id"] == "%19"
+    assert mapping["codex_session_id"] == "session-new"
+    events = client.get("/v1/events").json()
+    assert [event["type"] for event in events] == [
+        "agent_registered",
+        "managed_runtime_codex_session_bound",
+        "agent_registered",
+    ]
+
+
+def test_managed_caller_registration_refuses_mismatched_bootstrap_binding(
+    tmp_path: Path,
+) -> None:
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+    client = TestClient(app)
+    client.post(
+        "/v1/agents/register",
+        json={"agent_id": "managed-caller", "project": "demo"},
+    )
+    app.state.store.upsert_tmux_runtime_mapping(
+        entity_id="managed-caller",
+        server_mode="dedicated",
+        server_id="server-a",
+        socket_path=str(tmp_path / "runtime.sock"),
+        session_name="managed-caller",
+        pane_id="%19",
+        state="ready",
+        metadata={
+            "managed_rehydration": True,
+            "managed_bootstrap_id": "bootstrap-expected",
+        },
+    )
+
+    response = client.post(
+        "/v1/agents/register",
+        json={
+            "agent_id": "managed-caller",
+            "project": "demo",
+            "metadata": {
+                "tmux_pane_id": "%19",
+                "managed_bootstrap_id": "bootstrap-foreign",
+                "codex_session_id": "session-foreign",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    mapping = app.state.store.get_tmux_runtime_mapping("managed-caller")
+    assert mapping is not None
+    assert mapping["codex_session_id"] is None
+    assert not any(
+        event["type"] == "managed_runtime_codex_session_bound"
+        for event in client.get("/v1/events").json()
+    )
+
+
 def test_legacy_poll_endpoint_returns_gone_when_disabled(tmp_path: Path) -> None:
     client = TestClient(
         create_app(

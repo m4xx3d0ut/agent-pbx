@@ -112,6 +112,60 @@ class RuntimeRepository:
             ).fetchone()
         return self.mapping_from_row(row) if row is not None else None
 
+    def bind_managed_codex_session(
+        self,
+        entity_id: str,
+        *,
+        codex_session_id: str,
+        expected_pane_id: str,
+        expected_bootstrap_id: str,
+    ) -> dict[str, Any] | None:
+        """Bind a late Codex registration to its exact managed runtime.
+
+        Managed launch and rehydration create the tmux pane before Codex has a
+        thread id.  The first caller registration may fill that one empty
+        field, but it must not retarget an unmanaged, mismatched, or already
+        bound runtime.
+        """
+
+        session_id = str(codex_session_id or "").strip()
+        pane_id = str(expected_pane_id or "").strip()
+        bootstrap_id = str(expected_bootstrap_id or "").strip()
+        if not session_id or not pane_id or not bootstrap_id:
+            return None
+        current = now_ts()
+        with self._connections.managed() as connection:
+            begin_immediate(connection)
+            row = connection.execute(
+                "SELECT * FROM tmux_runtime_mappings WHERE entity_id = ?",
+                (entity_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            current_mapping = self.mapping_from_row(row)
+            metadata = current_mapping["metadata"]
+            if not (
+                metadata.get("managed_launch") is True
+                or metadata.get("managed_rehydration") is True
+            ):
+                return None
+            if str(row["pane_id"] or "") != pane_id:
+                return None
+            if str(metadata.get("managed_bootstrap_id") or "") != bootstrap_id:
+                return None
+            existing_session_id = str(row["codex_session_id"] or "").strip()
+            if existing_session_id:
+                return None
+            connection.execute(
+                """
+                UPDATE tmux_runtime_mappings
+                SET codex_session_id = ?, updated_at = ?
+                WHERE entity_id = ? AND (codex_session_id IS NULL OR codex_session_id = '')
+                """,
+                (session_id, current, entity_id),
+            )
+        return self.get_mapping(entity_id)
+
     def list_mappings(self) -> list[dict[str, Any]]:
         with self._connections.managed() as connection:
             rows = connection.execute(

@@ -428,6 +428,29 @@ def register_agent_lifecycle_routes(
             )
             raise HTTPException(status_code=409, detail=violation["reason"])
         agent = store.register_agent(request)
+        agent_metadata = (
+            agent.get("metadata")
+            if isinstance(agent.get("metadata"), dict)
+            else {}
+        )
+        bound_mapping = store.bind_managed_tmux_codex_session(
+            request.agent_id,
+            codex_session_id=str(agent_metadata.get("codex_session_id") or ""),
+            expected_pane_id=str(agent_metadata.get("tmux_pane_id") or ""),
+            expected_bootstrap_id=str(
+                agent_metadata.get("managed_bootstrap_id") or ""
+            ),
+        )
+        if bound_mapping is not None:
+            store.append_event(
+                "managed_runtime_codex_session_bound",
+                {
+                    "agent_id": request.agent_id,
+                    "pane_id": bound_mapping.get("pane_id"),
+                    "codex_session_id": bound_mapping.get("codex_session_id"),
+                },
+                request.agent_id,
+            )
         registered_project = str(agent.get("project") or request.project)
         registered_agent_type = str(agent.get("agent_type") or request.agent_type)
         store.append_event(
