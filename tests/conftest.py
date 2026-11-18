@@ -14,6 +14,10 @@ def restore_agent_pbx_environment() -> None:
         for key, value in os.environ.items()
         if key.startswith("AGENT_PBX_")
     }
+    os.environ.setdefault(
+        "AGENT_PBX_CODEX_MODEL_POLICY_FILE",
+        "/__agent_pbx_tests__/model-policy.toml",
+    )
     try:
         yield
     finally:

@@ -11,11 +11,10 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, statu
 
 from ..auth import get_store, require_token
 from ..codex.profiles import (
-    DEFAULT_CALLER_PROFILE_ID,
-    DEFAULT_OPERATOR_PROFILE_ID,
     MANAGED_CODEX_PROFILES,
     managed_profile_view,
 )
+from ..codex.policy import load_codex_model_policy
 from ..codex.skills import PersonalityOverlay
 from ..runtime_tmux import (
     OuterTmuxContext,
@@ -194,6 +193,7 @@ def register_runtime_routes(
     )
     async def get_codex_profiles() -> dict[str, object]:
         catalog = await asyncio.to_thread(inspect_codex_model_catalog)
+        model_policy = await asyncio.to_thread(load_codex_model_policy)
         overlay_path = Path(
             os.getenv("AGENT_PBX_PERSONALITY_OVERLAY")
             or "~/.config/agent-pbx/personality.local.md"
@@ -201,11 +201,9 @@ def register_runtime_routes(
         overlay = await asyncio.to_thread(PersonalityOverlay.load, overlay_path)
         return {
             "api_version": "agent-pbx.codex-profiles/v2",
-            "default_profile": DEFAULT_CALLER_PROFILE_ID,
-            "role_defaults": {
-                "caller": DEFAULT_CALLER_PROFILE_ID,
-                "operator": DEFAULT_OPERATOR_PROFILE_ID,
-            },
+            "default_profile": model_policy.caller_profile_id,
+            "role_defaults": model_policy.public_dict()["role_defaults"],
+            "model_policy": model_policy.public_dict(),
             "profiles": managed_profile_view(catalog),
             "personality": {
                 "committed": "roses-architect",

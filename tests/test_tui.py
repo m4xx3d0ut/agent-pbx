@@ -4450,7 +4450,10 @@ async def test_tui_managed_project_picker_loads_api_projects() -> None:
         await pilot.pause()
         table = app.screen.query_one("#managed-projects", DataTable)
         assert table.row_count == 1
-        assert app.screen.query_one("#managed-agent-profile", Select).value == "sol-high"
+        assert (
+            app.screen.query_one("#managed-agent-profile", Select).value
+            == "sol-6.2-medium"
+        )
 
 
 async def test_tui_runtime_migration_applies_only_eligible_candidates() -> None:
@@ -14620,7 +14623,7 @@ async def test_managed_project_picker_dismisses_before_selecting_launched_agent(
         {
             "project_path": "/tmp/demo",
             "agent_id": "",
-            "profile_id": "sol-high",
+            "profile_id": "sol-6.2-medium",
             "runtime_server_mode": "dedicated",
             "launch_mode": "agent",
             "existing_owner_ids": [],

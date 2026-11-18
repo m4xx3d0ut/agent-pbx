@@ -90,6 +90,7 @@ from .codex.profiles import (
     managed_profile_from_metadata,
     portable_codex_keymap_overrides,
 )
+from .codex.policy import CodexModelPolicy, load_codex_model_policy
 from .git_worktree import (
     LinkedWorktreeGitAdminPlan,
     LinkedWorktreeQualificationError,
@@ -4481,6 +4482,7 @@ class AgentPBXTUI(App[None]):
         self._prompt_reference_controller = PromptReferenceController(self)
         self._github_controller = GitHubController(self)
         self._workerbee_projection_controller = WorkerBeeProjectionController(self)
+        self.codex_model_policy: CodexModelPolicy = load_codex_model_policy()
         self.custom_theme_name = env_custom_theme_name()
         self.custom_palette = env_custom_palette()
         self.custom_theme = build_theme(self.custom_theme_name, self.custom_palette)
@@ -5210,11 +5212,20 @@ class AgentPBXTUI(App[None]):
     ) -> CodexModelPreset:
         target_id = str(agent_id or self.selected_agent_id or "").strip()
         agent = self.agents.get(target_id) or {}
-        key = (
-            DEFAULT_OPERATOR_MODEL_PRESET_KEY
-            if self.agent_type(agent) == OPERATOR_AGENT_TYPE
-            else DEFAULT_CALLER_MODEL_PRESET_KEY
-        )
+        role = "caller"
+        if self.agent_type(agent) == OPERATOR_AGENT_TYPE:
+            metadata = self.agent_metadata(agent)
+            operator_role = str(metadata.get("operator_role") or "root").strip()
+            fork_purpose = str(metadata.get("fork_purpose") or "").strip()
+            if operator_role == OPERATOR_ROLE_FORK:
+                role = (
+                    "review_fork"
+                    if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+                    else "edit_fork"
+                )
+            else:
+                role = "operator"
+        key = self.codex_model_policy.profile_id_for_role(role)
         return CODEX_MODEL_PRESET_BY_KEY[key]
 
     def sync_codex_model_preset_for_agent(self, agent_id: str) -> CodexModelPreset:
@@ -7673,6 +7684,7 @@ class AgentPBXTUI(App[None]):
             ManagedProjectPickerScreen(
                 [item for item in projects if isinstance(item, dict)],
                 [str(item) for item in roots] if isinstance(roots, list) else [],
+                default_profile_id=self.codex_model_policy.caller_profile_id,
             )
         )
 
@@ -22727,7 +22739,7 @@ class AgentPBXTUI(App[None]):
         existing_metadata = self.operator_metadata_for(agent_id)
         launch_preset = (
             codex_model_preset_from_metadata(existing_metadata)
-            or CODEX_MODEL_PRESET_BY_KEY[DEFAULT_OPERATOR_MODEL_PRESET_KEY]
+            or self.codex_model_policy.profile_for_role("operator")
         )
         source_caller = self.agents.get(source_caller_agent_id or "")
         source_metadata = (
@@ -23166,7 +23178,11 @@ class AgentPBXTUI(App[None]):
             source_session_id,
             fork_track_id=resolved_track_id,
         )
-        launch_preset = CODEX_MODEL_PRESET_BY_KEY[DEFAULT_OPERATOR_MODEL_PRESET_KEY]
+        launch_preset = self.codex_model_policy.profile_for_role(
+            "review_fork"
+            if resolved_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+            else "edit_fork"
+        )
         fork_metadata = {
             "agent_type": OPERATOR_AGENT_TYPE,
             "operator_role": OPERATOR_ROLE_FORK,
@@ -27730,10 +27746,7 @@ class AgentPBXTUI(App[None]):
         if not await self.ensure_operator_auth_ready():
             return
         metadata = self.operator_metadata_for(agent_id)
-        launch_preset = (
-            codex_model_preset_from_metadata(metadata)
-            or CODEX_MODEL_PRESET_BY_KEY[DEFAULT_OPERATOR_MODEL_PRESET_KEY]
-        )
+        launch_preset = codex_model_preset_from_metadata(metadata)
         cwd = str(metadata.get("cwd") or self.operator_cwd()).strip() or os.getcwd()
         try:
             fork_identity = self.operator_fork_resume_identity(agent_id, cwd=cwd)
@@ -27752,6 +27765,16 @@ class AgentPBXTUI(App[None]):
             if fork_identity is not None
             else ""
         )
+        if launch_preset is None:
+            launch_preset = self.codex_model_policy.profile_for_role(
+                "operator"
+                if fork_identity is None
+                else (
+                    "review_fork"
+                    if fork_purpose == REVIEW_OPERATOR_FORK_PURPOSE
+                    else "edit_fork"
+                )
+            )
         git_admin_plan = None
         if fork_identity is not None:
             try:

@@ -20,10 +20,17 @@ from ..preferences import TMUX_RUNTIME_SERVER_MODE_CHOICES
 class ManagedProjectPickerScreen(ModalScreen[None]):
     BINDINGS = [("escape", "dismiss", "Close")]
 
-    def __init__(self, projects: list[dict[str, Any]], roots: list[str]) -> None:
+    def __init__(
+        self,
+        projects: list[dict[str, Any]],
+        roots: list[str],
+        *,
+        default_profile_id: str = DEFAULT_CALLER_PROFILE_ID,
+    ) -> None:
         super().__init__()
         self.projects = projects
         self.roots = roots
+        self.default_profile_id = default_profile_id
         self.selected_path = ""
         self.selected_owners: list[str] = []
 
@@ -53,7 +60,7 @@ class ManagedProjectPickerScreen(ModalScreen[None]):
                     for profile in MANAGED_CODEX_PROFILE_ORDER
                     if not profile.elevated and not profile.migration_only
                 ),
-                value=DEFAULT_CALLER_PROFILE_ID,
+                value=self.default_profile_id,
                 allow_blank=False,
                 id="managed-agent-profile",
             )

@@ -151,7 +151,10 @@ def test_profiles_and_managed_skills_api(tmp_path: Path, monkeypatch) -> None:
     assert profiles.json()["role_defaults"] == {
         "caller": "sol-6.2-medium",
         "operator": "sol-6.2-high",
+        "edit_fork": "sol-6.2-high",
+        "review_fork": "sol-6.2-high",
     }
+    assert profiles.json()["model_policy"]["control_mode"] == "guard_elevated"
     by_id = {item["profile_id"]: item for item in profiles.json()["profiles"]}
     assert by_id["luna-6-high"]["available"] is True
     assert by_id["sol-6.2-ultra"]["execution_mode"] == "delegated"
