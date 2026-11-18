@@ -8053,7 +8053,7 @@ async def test_tui_existing_operator_root_is_reused_before_launch_metadata_chang
 
     class Client:
         async def get(self, path: str, **_kwargs: object) -> Response:
-            assert path == "/v2/workerbee/workspace-policy"
+            assert path == "/v2/agents/operator-0/workerbee/workspace-policy"
             return Response(
                 {
                     "access_posture": {
@@ -18997,7 +18997,7 @@ async def test_tui_start_operator_configures_mcp_and_launch_env(monkeypatch) -> 
         async def get(self, path: str, **_: object) -> Response:
             if path == "/v1/auth/check":
                 return Response({"ok": True})
-            assert path == "/v2/workerbee/workspace-policy"
+            assert path == "/v2/agents/operator-0/workerbee/workspace-policy"
             return Response(
                 {
                     "access_posture": {
@@ -19143,7 +19143,8 @@ async def test_tui_start_operator_does_not_bind_stale_caller_when_operator_selec
         async def get(self, path: str, **_: object) -> Response:
             if path == "/v1/auth/check":
                 return Response({"ok": True})
-            assert path == "/v2/workerbee/workspace-policy"
+            assert path.startswith("/v2/agents/operator-")
+            assert path.endswith("/workerbee/workspace-policy")
             return Response(
                 {
                     "access_posture": {
@@ -19268,7 +19269,7 @@ async def test_tui_resume_operator_uses_previous_session_when_live_pane_exists(
         async def get(self, path: str, **_kwargs: object) -> Response:
             if path == "/v2/tmux/runtimes/operator-0":
                 return Response(app.tmux_runtime_mapping_by_agent["operator-0"])
-            assert path == "/v2/workerbee/workspace-policy"
+            assert path == "/v2/agents/operator-0/workerbee/workspace-policy"
             return Response(
                 {
                     "access_posture": {
@@ -20685,7 +20686,7 @@ async def test_tui_restart_operator_root_resumes_current_session(monkeypatch) ->
         async def get(self, path: str, **_: object) -> Response:
             if path == "/v1/auth/check":
                 return Response({"ok": True})
-            assert path == "/v2/workerbee/workspace-policy"
+            assert path == "/v2/agents/operator-0/workerbee/workspace-policy"
             return Response(
                 {
                     "access_posture": {
@@ -28419,7 +28420,10 @@ async def test_tui_new_root_uses_configured_workerbee_default_with_policy_eviden
 
     class Client:
         async def get(self, path: str, **_kwargs: object) -> Response:
-            assert path == "/v2/workerbee/workspace-policy"
+            assert path in {
+                "/v2/agents/operator-6/workerbee/workspace-policy",
+                "/v2/agents/operator-7/workerbee/workspace-policy",
+            }
             return Response(
                 {
                     "effective_digest": "d" * 64,
@@ -28496,6 +28500,7 @@ async def test_tui_new_root_uses_configured_workerbee_default_with_policy_eviden
     assert len(posts) == 2
     with pytest.raises(ValueError, match="digest is stale or mismatched"):
         await app.operator_workerbee_server_authority(
+            agent_id="operator-6",
             profile="trusted-workbench",
             expected_digest="a" * 64,
         )
@@ -28533,7 +28538,7 @@ async def test_tui_existing_root_without_profile_is_not_auto_migrated(
 
     class Client:
         async def get(self, path: str, **_kwargs: object) -> Response:
-            assert path == "/v2/workerbee/workspace-policy"
+            assert path == "/v2/agents/operator-6/workerbee/workspace-policy"
             return Response(
                 {
                     "access_posture": {
@@ -28607,7 +28612,7 @@ async def test_tui_existing_legacy_root_above_current_ceiling_fails_before_post(
 
     class Client:
         async def get(self, path: str, **_kwargs: object) -> Response:
-            assert path == "/v2/workerbee/workspace-policy"
+            assert path == "/v2/agents/operator-6/workerbee/workspace-policy"
             return Response()
 
         async def post(self, *_args: object, **_kwargs: object) -> object:
@@ -28690,7 +28695,10 @@ async def test_tui_uses_daemon_workerbee_posture_over_local_environment(
 
     class Client:
         async def get(self, path: str, **_kwargs: object) -> Response:
-            assert path == "/v2/workerbee/workspace-policy"
+            assert path in {
+                "/v2/agents/operator-6/workerbee/workspace-policy",
+                "/v2/agents/operator-6-observe/workerbee/workspace-policy",
+            }
             return Response()
 
         async def post(
@@ -28711,12 +28719,16 @@ async def test_tui_uses_daemon_workerbee_posture_over_local_environment(
 
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
 
-    selected, metadata = await app.operator_workerbee_server_authority(profile=None)
+    selected, metadata = await app.operator_workerbee_server_authority(
+        agent_id="operator-6",
+        profile=None,
+    )
 
     assert selected == "observe-local"
     assert metadata == {"workerbee_access_profile_ceiling": "observe-local"}
     with pytest.raises(ValueError, match="daemon-resolved ceiling"):
         await app.operator_workerbee_server_authority(
+            agent_id="operator-6",
             profile="trusted-workbench"
         )
     agent = await app.register_operator_root(
@@ -28747,18 +28759,78 @@ async def test_tui_explicit_local_profile_wins_over_broader_server_default() -> 
 
     class Client:
         async def get(self, path: str, **_kwargs: object) -> Response:
-            assert path == "/v2/workerbee/workspace-policy"
+            assert path == "/v2/agents/operator-6/workerbee/workspace-policy"
             return Response()
 
     app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
 
     selected, metadata = await app.operator_workerbee_server_authority(
+        agent_id="operator-6",
         profile="local-deploy",
         expected_ceiling="local-deploy",
     )
 
     assert selected == "local-deploy"
     assert metadata == {"workerbee_access_profile_ceiling": "trusted-workbench"}
+
+
+async def test_tui_operator_workerbee_authority_combines_entity_policy_and_global_posture() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    paths: list[str] = []
+
+    class Response:
+        def __init__(self, data: dict[str, object]) -> None:
+            self.data = data
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.data
+
+    class Client:
+        async def get(self, path: str, **_kwargs: object) -> Response:
+            paths.append(path)
+            if path == "/v2/agents/operator-6/workerbee/workspace-policy":
+                return Response(
+                    {
+                        "effective_digest": "e" * 64,
+                        "effective": {
+                            "policy": "scoped-workbench",
+                            "allowed_roots": ["/srv/work/operator-6"],
+                        },
+                        "constrained": False,
+                    }
+                )
+            assert path == "/v2/workerbee/workspace-policy"
+            return Response(
+                {
+                    "effective_digest": "g" * 64,
+                    "access_posture": {
+                        "operator_default_effective_profile": "trusted-workbench",
+                        "profile_ceiling": "trusted-workbench",
+                    },
+                }
+            )
+
+    app.api_client = lambda: Client()  # type: ignore[assignment,method-assign]
+
+    selected, metadata = await app.operator_workerbee_server_authority(
+        agent_id="operator-6",
+        profile="trusted-workbench",
+        expected_digest="e" * 64,
+        durable_profile=True,
+    )
+
+    assert selected == "trusted-workbench"
+    assert metadata == {
+        "workerbee_access_profile_ceiling": "trusted-workbench",
+        "workerbee_workspace_policy_digest": "e" * 64,
+    }
+    assert paths == [
+        "/v2/agents/operator-6/workerbee/workspace-policy",
+        "/v2/workerbee/workspace-policy",
+    ]
 
 
 async def test_tui_local_edit_fork_above_current_ceiling_fails_before_gateway() -> None:
@@ -28781,7 +28853,7 @@ async def test_tui_local_edit_fork_above_current_ceiling_fails_before_gateway() 
 
     class Client:
         async def get(self, path: str, **_kwargs: object) -> Response:
-            assert path == "/v2/workerbee/workspace-policy"
+            assert path == "/v2/agents/operator-6-fork-caller-1/workerbee/workspace-policy"
             return Response()
 
     async def prepare(**kwargs: object) -> None:
@@ -28842,7 +28914,7 @@ async def test_tui_edit_fork_profiles_at_or_below_current_ceiling_remain_green(
 
     class Client:
         async def get(self, path: str, **_kwargs: object) -> Response:
-            assert path == "/v2/workerbee/workspace-policy"
+            assert path == "/v2/agents/operator-6-fork-caller-1/workerbee/workspace-policy"
             return Response()
 
     async def prepare(**kwargs: object) -> None:

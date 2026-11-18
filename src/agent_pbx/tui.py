@@ -21372,6 +21372,7 @@ class AgentPBXTUI(App[None]):
     async def operator_workerbee_server_authority(
         self,
         *,
+        agent_id: str,
         profile: str | None,
         expected_ceiling: str = "",
         expected_digest: str = "",
@@ -21381,12 +21382,29 @@ class AgentPBXTUI(App[None]):
 
         try:
             response = await self.api_client().get(
-                "/v2/workerbee/workspace-policy",
+                f"/v2/agents/{quote(agent_id, safe='')}/workerbee/workspace-policy",
                 headers=auth_headers(self.token),
                 timeout=30,
             )
             response.raise_for_status()
             view = response.json()
+            if isinstance(view, dict) and not isinstance(
+                view.get("access_posture"), dict
+            ):
+                posture_response = await self.api_client().get(
+                    "/v2/workerbee/workspace-policy",
+                    headers=auth_headers(self.token),
+                    timeout=30,
+                )
+                posture_response.raise_for_status()
+                posture_view = posture_response.json()
+                if isinstance(posture_view, dict) and isinstance(
+                    posture_view.get("access_posture"), dict
+                ):
+                    view = {
+                        **view,
+                        "access_posture": posture_view["access_posture"],
+                    }
         except Exception as exc:
             raise WorkerBeeProfileIntentError(
                 "WorkerBee server policy evidence is unavailable"
@@ -21574,6 +21592,7 @@ class AgentPBXTUI(App[None]):
         if str(fork_metadata.get("fork_purpose") or "") != REVIEW_OPERATOR_FORK_PURPOSE:
             selected, server_metadata = (
                 await self.operator_workerbee_server_authority(
+                    agent_id=fork_agent_id,
                     profile=selected,
                     expected_ceiling=str(
                         fork_metadata.get(WORKERBEE_PROFILE_CEILING_METADATA_KEY)
@@ -21855,6 +21874,7 @@ class AgentPBXTUI(App[None]):
         if legacy_existing_profile:
             workerbee_profile, _server_metadata = (
                 await self.operator_workerbee_server_authority(
+                    agent_id=agent_id,
                     profile=lease_profile or entity_profile,
                     expected_ceiling=str(
                         profile_metadata.get(WORKERBEE_PROFILE_CEILING_METADATA_KEY)
@@ -21872,6 +21892,7 @@ class AgentPBXTUI(App[None]):
         else:
             server_profile, server_metadata = (
                 await self.operator_workerbee_server_authority(
+                    agent_id=agent_id,
                     profile=lease_profile or (entity_profile if explicit_profile else None),
                     expected_ceiling=str(
                         profile_metadata.get(WORKERBEE_PROFILE_CEILING_METADATA_KEY)
