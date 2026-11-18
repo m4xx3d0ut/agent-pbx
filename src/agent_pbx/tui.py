@@ -5334,7 +5334,7 @@ class AgentPBXTUI(App[None]):
         if open_lease is not None:
             lease_profile = str(open_lease.get("requested_profile") or "")
             lease_status = str(open_lease.get("status") or "")
-            if lease_profile != requested_profile:
+            if managed_profile_for(lease_profile) != preset:
                 self.notify(
                     f"{agent_id} already has an open elevation for {lease_profile}; "
                     "resolve it before requesting another profile.",
@@ -5640,8 +5640,7 @@ class AgentPBXTUI(App[None]):
             return None
         if (
             str(lease.get("agent_id") or "") != agent_id
-            or str(lease.get("requested_profile") or "")
-            != self.elevation_profile_id(preset)
+            or managed_profile_for(lease.get("requested_profile")) != preset
             or str(lease.get("status") or "") != "active"
             or bool(lease.get("expired"))
         ):

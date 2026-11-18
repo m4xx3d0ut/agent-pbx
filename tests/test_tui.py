@@ -15668,7 +15668,7 @@ async def test_tui_approved_model_elevation_resumes_existing_transition() -> Non
             {
                 "lease_id": "lease-approved",
                 "agent_id": "operator-5",
-                "requested_profile": "sol-max",
+                "requested_profile": "sol-5.6-max",
                 "prior_profile": "sol-5.6-xhigh",
                 "status": "approved",
             }
@@ -15699,6 +15699,15 @@ async def test_tui_approved_model_elevation_resumes_existing_transition() -> Non
         assert await app.prepare_model_elevation("operator-5", preset) is True
 
     assert restarts == [("operator-5", "lease-approved")]
+
+
+def test_tui_legacy_elevation_aliases_share_one_lease_identity() -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    preset = codex_model_preset_for("sol-max")
+    assert preset is not None
+
+    assert app.elevation_profile_id(preset) == "sol-max"
+    assert codex_model_preset_for("sol-max") == codex_model_preset_for("sol-5.6-max")
 
 
 async def test_tui_reverts_one_task_elevation_only_at_verified_boundary() -> None:
