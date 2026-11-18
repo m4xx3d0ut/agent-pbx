@@ -1,28 +1,28 @@
 {
   "ast_maxima": {
     "src/agent_pbx/api.py": {
-      "ast_nodes": 3266,
-      "bytes": 28808,
+      "ast_nodes": 3255,
+      "bytes": 28641,
       "classes": 1,
       "functions": 13,
       "imports": 59,
-      "lines": 792
+      "lines": 785
     },
     "src/agent_pbx/store.py": {
-      "ast_nodes": 55684,
-      "bytes": 461727,
+      "ast_nodes": 55657,
+      "bytes": 461660,
       "classes": 2,
       "functions": 380,
       "imports": 19,
-      "lines": 11832
+      "lines": 11826
     },
     "src/agent_pbx/tui.py": {
-      "ast_nodes": 172578,
-      "bytes": 1308322,
-      "classes": 20,
+      "ast_nodes": 172478,
+      "bytes": 1305218,
+      "classes": 19,
       "functions": 1193,
       "imports": 71,
-      "lines": 33014
+      "lines": 32842
     }
   },
   "baseline_commit": "56f46179863fed13f339ab3e55481a895b994921",
@@ -60,12 +60,12 @@
       "lines": 559
     },
     "src/agent_pbx/ui/command_catalog.py": {
-      "ast_nodes": 3686,
-      "bytes": 37961,
+      "ast_nodes": 3464,
+      "bytes": 36006,
       "classes": 3,
       "functions": 6,
       "imports": 7,
-      "lines": 728
+      "lines": 723
     },
     "src/agent_pbx/ui/controllers/github.py": {
       "ast_nodes": 6966,

@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+## v2.6.0rc1 - 2026-11-18
+
+### Added
+
+- Add exact, versioned managed profiles for Sol 6.2, Astra 6.2, Luna 6, and
+  Terra 6.1 with live-catalog validation, capability requirements, role hints,
+  and explicit migration fallbacks.
+- Add a layered model policy with safe committed defaults and an owner-only
+  workstation override for caller, root Operator, edit-fork, review-fork,
+  efficient-task, visual-task, and bounded-elevation profiles.
+- Integrate Codex's native `/model` picker with structured
+  `thread/settings/updated` observation, read-only thread hydration, selection
+  classification, entity-local adoption, and return-to-role-default actions.
+- Add managed Sol 6.2 max/ultra and Astra 6.2 xhigh/max/ultra elevation choices.
+  Ultra profiles carry explicit delegated-execution and subagent capability
+  requirements.
+
+### Changed
+
+- Set the committed caller default to Sol 6.2/medium and the committed root
+  Operator, edit-fork, and review-fork defaults to Sol 6.2/high.
+- Use Luna 6/high for efficient repeatable work and Terra 6.1/high for visual
+  or computer-use work. Terra is no longer treated as the low-cost task lane.
+- Update the isolated public demo and Codex Operator UAT defaults to the Codex
+  0.169.0 and Sol 6.2 profile generation.
+- Derive built-in palette collision protection from the reviewed command
+  catalog and extract model command actions behind a dedicated UI module.
+
+### Security
+
+- Keep direct catalog selections observable without silently changing shared
+  defaults. Entity-local adoption accepts only managed or current live-catalog
+  choices; custom-provider, stale-catalog, and unknown choices remain
+  observational.
+- Require an exact, unexpired, matching approved or active lease before an
+  elevated direct choice can be adopted. Unmatched, expired, and arbitrary
+  elevated selections fail closed.
+- Keep Sol 5.6, Terra 5.6, and Codex 5.5 profiles migration-only so retained
+  sessions remain resumable without allowing those profiles to become new
+  launch or shared-default choices.
+- Keep starred state independent from model policy. Starring or unstarring an
+  Agent or Operator never changes its model.
+
 ## v2.5.0 - 2026-11-18
 
 ### Highlights

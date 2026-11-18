@@ -80,7 +80,8 @@ from .codex_sessions import (
     latest_assistant_transcript_from_session_file,
     wait_for_codex_thread_writer_lock_release,
 )
-from .codex.profiles import (
+from .codex import (
+    CodexModelPolicy,
     DEFAULT_CALLER_PROFILE_ID,
     DEFAULT_OPERATOR_PROFILE_ID,
     MANAGED_CODEX_PROFILE_ORDER,
@@ -88,9 +89,9 @@ from .codex.profiles import (
     ManagedCodexProfile,
     managed_profile_for,
     managed_profile_from_metadata,
+    load_codex_model_policy,
     portable_codex_keymap_overrides,
 )
-from .codex.policy import CodexModelPolicy, load_codex_model_policy
 from .git_worktree import (
     LinkedWorktreeGitAdminPlan,
     LinkedWorktreeQualificationError,
@@ -189,6 +190,7 @@ from .runtime_tmux import (
 from .ui import (
     actions as ui_actions,
     github as ui_github,
+    model_commands as ui_model_commands,
     preferences as ui_preferences,
     presentation_options as ui_presentation_options,
     references as ui_references,
@@ -198,7 +200,11 @@ from .ui import (
 )
 from .ui.async_jobs import AsyncGenerationGate
 from .ui.button_router import route_button_pressed
-from .ui.command_catalog import CodexTerminalModes, iter_system_commands
+from .ui.command_catalog import (
+    REVIEWED_COMMAND_TITLES,
+    CodexTerminalModes,
+    iter_system_commands,
+)
 from .ui.controllers import (
     CampaignController,
     GitHubController,
@@ -791,198 +797,9 @@ THEME_KEYS = (
 CODEX_STATUS_LINE_PATTERN = re.compile(
     r"\b(Working|Thinking|Reading|Editing|Running|Waiting)\b"
 )
-BUILT_IN_PALETTE_COMMAND_NAMES = {
-    "/refresh",
-    "/detail",
-    "/ping",
-    "/unblock",
-    "/working",
-    "/cancel",
-    "/esc",
-    "/ctrlc",
-    "/restart",
-    "/codex restart",
-    "/codex",
-    "/codex config",
-    "/codex config refresh",
-    "/codex config save",
-    "/codex keymap",
-    "/codex keymap portable",
-    "/codex keymap reset",
-    "/pbx keymap",
-    "/codex mcp wire",
-    "/codex update",
-    "/codex model",
-    "/codex model adopt",
-    "/codex model inspect",
-    "/codex model native",
-    "/codex model plan",
-    "/codex model return",
-    "/codex model cleanup plan",
-    "/codex model terra-max",
-    "/codex model terra-xhigh",
-    "/codex model sol-max",
-    "/codex model sol-medium",
-    "/codex model sol-ultra",
-    "/codex model sol-xhigh",
-    "/codex model astra-xhigh",
-    "/codex model astra-max",
-    "/codex model astra-ultra",
-    "/codex model luna-high",
-    "/codex model legacy-5.5",
-    "/codex model default terra-max",
-    "/codex model default terra-xhigh",
-    "/codex model default sol-max",
-    "/codex model default sol-medium",
-    "/codex model default sol-xhigh",
-    "/codex model default legacy-5.5",
-    "/tmux",
-    "/latest",
-    "/thread",
-    "/files",
-    "/files open editor",
-    "/files open terminal",
-    "/files open text",
-    "/editor",
-    "/editor open",
-    "/editor workspace",
-    "/editor text",
-    "/editor save",
-    "/editor revert",
-    "/editor check",
-    "/editor copy path",
-    "/editor copy text",
-    "/editor fullscreen",
-    "/view fullscreen",
-    "/editor close",
-    "/editor focus",
-    "/editor reveal",
-    "/editor terminal",
-    "/editor terminal open",
-    "/editor terminal nvim",
-    "/editor terminal vim",
-    "/editor terminal nano",
-    "/editor terminal close",
-    "/editor terminal forget",
-    "/workerbee",
-    "/workerbee preflight",
-    "/workerbee access",
-    "/workerbee workspace",
-    "/workerbee policy",
-    "/workerbee content",
-    "/workerbee run",
-    "/workerbee run status",
-    "/workerbee run cancel",
-    "/workerbee run leases",
-    "/workerbee switch oss",
-    "/workerbee switch debug",
-    "/workerbee switch rollback",
-    "/campaigns",
-    "/campaign monitor",
-    "/campaign report",
-    "/campaign copy",
-    "/pr",
-    "/pr refresh",
-    "/pr review",
-    "/pr validate",
-    "/pr url",
-    "/pr merge",
-    "/issue",
-    "/issue refresh",
-    "/issue mitigate",
-    "/issue url",
-    "/issue clear",
-    "/joplin",
-    "/joplin refresh",
-    "/joplin new",
-    "/joplin rename",
-    "/joplin delete",
-    "/joplin prompt",
-    "/joplin copy",
-    "/joplin copy force",
-    "/joplin copy report",
-    "/joplin copy mode copy-first",
-    "/joplin copy mode transcript-first",
-    "/joplin copy mode tmux-capture",
-    "/joplin log start",
-    "/joplin log stop",
-    "/joplin save",
-    "/joplin note copy",
-    "/joplin note copy source",
-    "/joplin note paste",
-    "/joplin promote conflict",
-    "/joplin retry write",
-    "/joplin sync",
-    "/joplin validate profile",
-    "/plan",
-    "/plan latest",
-    "/plan thread",
-    "/plan select 1",
-    "/plan select 2",
-    "/plan select 3",
-    "/operator start",
-    "/operator focus",
-    "/operator history",
-    "/operator resume",
-    "/operator restart",
-    "/operator stop",
-    "/operator hide",
-    "/operator purge",
-    "/operator fork next",
-    "/operator fork prev",
-    "/operator fork review",
-    "/operator handoffs",
-    "/operator handoff preflight",
-    "/operator handoff approve",
-    "/operator handoff launch",
-    "/operator knowledge links",
-    "/operator knowledge send",
-    "/operator kb",
-    "/operator kb detail",
-    "/operator kb proposed",
-    "/operator kb proposed detail",
-    "/operator kb search",
-    "/operator kb history",
-    "/operator kb misses",
-    "/operator kb seed",
-    "/operator kb promote",
-    "/operator kb reject",
-    "/operator kb retire",
-    "/operator helpers",
-    "/operator resources",
-    "/operator project spawn",
-    "/operator project spawn inspect",
-    "/operator project spawn cancel",
-    "/gitstatus",
-    "/gitdiff",
-    "/gitpush",
-    "/gitstageandcommit",
-    "/commands reload",
-    "/palette history",
-    "/palette history clear",
-    "/palette history persistence on",
-    "/palette history persistence off",
-    "/navigation back",
-    "/navigation forward",
-    "/agents prune",
-    "/agents prune apply",
-    "/agents prune stale",
-    "/agents prune forks",
-    "/agents prune undo",
-    "/workspace launch",
-    "/agent launch",
-    "/hide agent",
-    "/show hidden agents",
-    "/unhide agent",
-    "/purge agent",
-    "/theme cyberpunk",
-    "/theme cyberpunk-accessible",
-    "/theme minimal",
-    "/layout adaptive",
-    "/layout split",
-    "/layout compact",
-    "/layout tiny",
-}
+BUILT_IN_PALETTE_COMMAND_NAMES = frozenset(
+    (*REVIEWED_COMMAND_TITLES, "/plan select 1", "/plan select 2", "/plan select 3")
+)
 PULL_REQUEST_SLASH_ACTIONS = {
     "/pr": "open",
     "/pr refresh": "refresh",
@@ -8325,38 +8142,10 @@ class AgentPBXTUI(App[None]):
         self.activate_agent_tab("codex-tab")
         self.update_codex_model_status(self.selected_codex_model_preset())
 
-    def palette_codex_model_native(self) -> None:
-        self.run_worker(
-            self.open_native_codex_model_picker(),
-            name="codex-native-model-picker",
-            exclusive=True,
-        )
-
-    def palette_codex_model_inspect(self) -> None:
-        self.run_worker(
-            self.inspect_direct_codex_model_selection(),
-            name="codex-model-inspect",
-            exclusive=True,
-        )
-
-    def palette_codex_model_adopt(self) -> None:
-        self.run_worker(
-            self.adopt_direct_codex_model_selection(),
-            name="codex-model-adopt",
-            exclusive=True,
-        )
-
-    def palette_codex_model_return(self) -> None:
-        agent_id = self.codex_model_target_agent_id()
-        if agent_id is None:
-            return
-        preset = self.default_codex_model_preset_for_agent(agent_id)
-        self.set_codex_model_preset_selector(preset)
-        self.run_worker(
-            self.request_codex_model_restart(agent_id, preset),
-            name=f"codex-model-return-{slugify(agent_id)}",
-            exclusive=True,
-        )
+    palette_codex_model_native = ui_model_commands.palette_codex_model_native
+    palette_codex_model_inspect = ui_model_commands.palette_codex_model_inspect
+    palette_codex_model_adopt = ui_model_commands.palette_codex_model_adopt
+    palette_codex_model_return = ui_model_commands.palette_codex_model_return
 
     def palette_codex_model_plan(self) -> None:
         self.run_worker(

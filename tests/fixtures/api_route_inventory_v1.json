@@ -991,6 +991,11 @@
   },
   {
     "method": "POST",
+    "operation_id": "adopt_agent_codex_runtime_model_v2_agents__agent_id__codex_runtime_adopt_model_post",
+    "path": "/v2/agents/{agent_id}/codex-runtime/adopt-model"
+  },
+  {
+    "method": "POST",
     "operation_id": "observe_agent_codex_runtime_v2_agents__agent_id__codex_runtime_events_post",
     "path": "/v2/agents/{agent_id}/codex-runtime/events"
   },

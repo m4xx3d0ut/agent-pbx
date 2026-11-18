@@ -7,7 +7,7 @@ from typing import Any
 from textual.app import SystemCommand
 
 from ..terminal import EMBEDDED_SCROLL_MODE_CHILD, EMBEDDED_SCROLL_MODE_TMUX
-from . import preferences
+from . import model_commands, preferences
 
 
 ACCESSIBLE_TUI_THEME = preferences.ACCESSIBLE_TUI_THEME
@@ -75,12 +75,11 @@ REVIEWED_COMMAND_TITLES = (
     '/codex model astra-ultra',
     '/codex model astra-xhigh',
     '/codex model cleanup plan',
-    '/codex model default legacy-5.5',
+    '/codex model default luna-high',
     '/codex model default sol-high',
     '/codex model default sol-max',
     '/codex model default sol-medium',
     '/codex model default sol-xhigh',
-    '/codex model default terra-max',
     '/codex model default terra-xhigh',
     '/codex model legacy-5.5',
     '/codex model luna-high',
@@ -93,7 +92,6 @@ REVIEWED_COMMAND_TITLES = (
     '/codex model sol-medium',
     '/codex model sol-ultra',
     '/codex model sol-xhigh',
-    '/codex model terra-max',
     '/codex model terra-xhigh',
     '/codex restart',
     '/codex terminal default',
@@ -366,30 +364,7 @@ def iter_system_commands(
     yield catalog.command("/codex keymap reset", "Remove the Agent PBX keymap overrides", app.palette_codex_keymap_reset)
     yield catalog.command("/codex mcp wire", "Write Agent PBX MCP config to global Codex config", app.palette_codex_mcp_wire)
     yield catalog.command("/codex update", "Update host Codex CLI via the Agent PBX daemon", app.palette_codex_update)
-    yield catalog.command("/codex model", "Open Codex model presets", app.palette_codex_model)
-    yield catalog.command("/codex model inspect", "Inspect the live Codex /model selection", app.palette_codex_model_inspect)
-    yield catalog.command("/codex model adopt", "Adopt the live Codex model for this entity's resume", app.palette_codex_model_adopt)
-    yield catalog.command("/codex model return", "Return the selected entity to its PBX role default", app.palette_codex_model_return)
-    yield catalog.command("/codex model native", "Open the native Codex /model picker", app.palette_codex_model_native)
-    yield catalog.command("/codex model plan", "Plan model migration for the selected agent", app.palette_codex_model_plan)
-    yield catalog.command("/codex model cleanup plan", "Plan one-time starred/operator model cleanup", app.palette_codex_model_cleanup_plan)
-    yield catalog.command("/codex model terra-xhigh", "Restart selected Codex pane on Terra 6.1/xhigh", lambda: app.palette_codex_model_restart("terra-6.1-xhigh"))
-    yield catalog.command("/codex model sol-medium", "Restart selected Codex pane on Sol 6.2/medium", lambda: app.palette_codex_model_restart("sol-6.2-medium"))
-    yield catalog.command("/codex model sol-high", "Restart selected Codex pane on Sol 6.2/high", lambda: app.palette_codex_model_restart("sol-6.2-high"))
-    yield catalog.command("/codex model sol-xhigh", "Restart selected Codex pane on Sol 6.2/xhigh", lambda: app.palette_codex_model_restart("sol-6.2-xhigh"))
-    yield catalog.command("/codex model sol-max", "Restart selected Codex pane on Sol 6.2/max", lambda: app.palette_codex_model_restart("sol-6.2-max"))
-    yield catalog.command("/codex model sol-ultra", "Restart selected Codex pane on Sol 6.2/ultra", lambda: app.palette_codex_model_restart("sol-6.2-ultra"))
-    yield catalog.command("/codex model astra-xhigh", "Restart selected Codex pane on Astra 6.2/xhigh", lambda: app.palette_codex_model_restart("astra-6.2-xhigh"))
-    yield catalog.command("/codex model astra-max", "Restart selected Codex pane on Astra 6.2/max", lambda: app.palette_codex_model_restart("astra-6.2-max"))
-    yield catalog.command("/codex model astra-ultra", "Restart selected Codex pane on Astra 6.2/ultra", lambda: app.palette_codex_model_restart("astra-6.2-ultra"))
-    yield catalog.command("/codex model luna-high", "Restart selected Codex pane on Luna 6/high", lambda: app.palette_codex_model_restart("luna-6-high"))
-    yield catalog.command("/codex model legacy-5.5", "Restart selected Codex pane on Codex 5.5/xhigh", lambda: app.palette_codex_model_restart("legacy-5.5-xhigh"))
-    yield catalog.command("/codex model default terra-xhigh", "Save Terra 6.1/xhigh as global Codex default", lambda: app.palette_codex_model_default("terra-6.1-xhigh"))
-    yield catalog.command("/codex model default sol-medium", "Save Sol 6.2/medium as global Codex default", lambda: app.palette_codex_model_default("sol-6.2-medium"))
-    yield catalog.command("/codex model default sol-high", "Save Sol 6.2/high as global Codex default", lambda: app.palette_codex_model_default("sol-6.2-high"))
-    yield catalog.command("/codex model default luna-high", "Save Luna 6/high as global Codex default", lambda: app.palette_codex_model_default("luna-6-high"))
-    yield catalog.command("/codex model default sol-max", "Review Sol 6.2/max bounded elevation", lambda: app.palette_codex_model_default("sol-6.2-max"))
-    yield catalog.command("/codex model default sol-xhigh", "Save Sol 6.2/xhigh as global Codex default", lambda: app.palette_codex_model_default("sol-6.2-xhigh"))
+    yield from model_commands.iter_model_commands(app, catalog)
     yield catalog.command("/codex terminal scrollback", "Use PBX-compatible Codex scrollback for managed panes", lambda: app.set_codex_terminal_mode(terminal_modes.scrollback))
     yield catalog.command("/codex terminal raw", "Use Codex raw scrollback for managed panes", lambda: app.set_codex_terminal_mode(terminal_modes.raw))
     yield catalog.command("/codex terminal default", "Use Codex default terminal behavior for managed panes", lambda: app.set_codex_terminal_mode(terminal_modes.default))

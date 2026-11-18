@@ -5056,7 +5056,7 @@
             "type": "string"
           },
           "profile_id": {
-            "default": "sol-high",
+            "default": "sol-6.2-medium",
             "maxLength": 120,
             "minLength": 1,
             "title": "Profile Id",
@@ -5134,7 +5134,7 @@
             "title": "Preview Token"
           },
           "profile_id": {
-            "default": "sol-high",
+            "default": "sol-6.2-medium",
             "maxLength": 120,
             "minLength": 1,
             "title": "Profile Id",
@@ -14969,7 +14969,7 @@
   },
   "info": {
     "title": "Agent PBX",
-    "version": "2.5.0"
+    "version": "2.6.0rc1"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -25699,6 +25699,53 @@
           }
         ],
         "summary": "Get Agent Codex Runtime"
+      }
+    },
+    "/v2/agents/{agent_id}/codex-runtime/adopt-model": {
+      "post": {
+        "description": "Adopt one observed direct ``/model`` choice for this PBX entity.\n\nThis updates entity-local resume metadata only. It never changes the\ncommitted profile registry, workstation role defaults, or global Codex\nconfiguration.",
+        "operationId": "adopt_agent_codex_runtime_model_v2_agents__agent_id__codex_runtime_adopt_model_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Adopt Agent Codex Runtime Model V2 Agents  Agent Id  Codex Runtime Adopt Model Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Adopt Agent Codex Runtime Model"
       }
     },
     "/v2/agents/{agent_id}/codex-runtime/events": {
