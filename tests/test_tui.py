@@ -20027,6 +20027,51 @@ async def test_tui_launch_restart_pane_retries_dead_replacement(
     assert launches == ["%dead", "%live"]
 
 
+async def test_tui_respawn_restart_pane_refreshes_identity_before_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentPBXTUI(server="http://127.0.0.1:8765")
+    calls: list[str] = []
+
+    monkeypatch.setattr("agent_pbx.tui.CODEX_RESTART_STABILIZE_SECONDS", 0.0)
+    monkeypatch.setattr(
+        tmux_support,
+        "respawn_pane",
+        lambda *_args, **_kwargs: calls.append("respawn"),
+    )
+    monkeypatch.setattr(tmux_support, "pane_exists", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        tmux_support,
+        "pane_remain_on_exit",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        tmux_support,
+        "set_pane_remain_on_exit",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(tmux_support, "pane_is_live", lambda *_args, **_kwargs: True)
+
+    async def no_lease_conflict(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    async def refresh(agent_id: str, pane_id: str) -> bool:
+        calls.append(f"refresh:{agent_id}:{pane_id}")
+        return True
+
+    app.tmux_pane_has_codex_session_lease_conflict = no_lease_conflict  # type: ignore[method-assign]
+    app.refresh_tmux_runtime_mapping_after_restart = refresh  # type: ignore[method-assign]
+
+    assert await app.respawn_restart_pane(
+        pane_id="%10",
+        command="codex resume session-1",
+        label="agent-1",
+        tmux_bin="/opt/tmux-3.7c",
+        socket_path="/tmp/agent-pbx-runtime.sock",
+    ) == "%10"
+    assert calls == ["respawn", "refresh:agent-1:%10"]
+
+
 async def test_tui_respawn_restart_pane_rolls_back_in_same_pane_after_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

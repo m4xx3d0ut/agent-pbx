@@ -17944,6 +17944,14 @@ class AgentPBXTUI(App[None]):
                                     f"{pane_id} opened Codex's conversation lease dialog"
                                 )
                                 break
+                            if not await self.refresh_tmux_runtime_mapping_after_restart(
+                                label,
+                                pane_id,
+                            ):
+                                failures.append(
+                                    f"{pane_id} process evidence refresh failed"
+                                )
+                                break
                             replacement_ready = True
                             return pane_id
                         exit_status = await asyncio.to_thread(
