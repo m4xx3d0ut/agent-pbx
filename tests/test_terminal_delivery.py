@@ -58,6 +58,26 @@ def _register_target(
     )
 
 
+def _register_caller_target(
+    store: Store,
+    *,
+    codex_session_id: str = "session-1",
+    workspace: str = "/srv/work/project",
+) -> None:
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-6-fork-caller-1",
+            project="caller-project",
+            agent_type="caller",
+            metadata={
+                "pbx_mode": "report",
+                "codex_session_id": codex_session_id,
+                "cwd": workspace,
+            },
+        )
+    )
+
+
 def _register_mapping(
     store: Store,
     *,
@@ -239,6 +259,54 @@ def test_idle_delivery_binds_exact_target_and_audits_without_prompt(
         },
         "decision_source": "exact_managed_terminal",
     }
+
+
+def test_idle_delivery_binds_exact_caller_without_operator_authority_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    _register_caller_target(store)
+    _register_mapping(store)
+    sent: list[str] = []
+    _patch_ready_terminal(monkeypatch, sent=sent)
+
+    result = _service(store).deliver(_request(request_id="caller-delivery"))
+
+    expected_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "entity_id": "operator-6-fork-caller-1",
+                "project": "caller-project",
+                "workspace_path": "/srv/work/project",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert result.outcome == IdleTargetDeliveryOutcome.DELIVERED
+    assert result.target_identity is not None
+    assert result.target_identity["authority_profile"] == "caller-runtime"
+    assert result.target_identity["workspace_set_digest"] == expected_digest
+    assert sent == ["Continue the exact task."]
+
+
+def test_idle_delivery_still_requires_operator_authority_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    _register_target(store, authority_profile="")
+    _register_mapping(store)
+    _patch_ready_terminal(monkeypatch)
+
+    result = _service(store).deliver(_request(request_id="operator-no-authority"))
+
+    assert result.outcome == IdleTargetDeliveryOutcome.STALE_MAPPING
+    assert result.reason_code == "runtime_identity_incomplete"
+    assert "authority_profile" in result.reason
 
 
 def test_terminal_report_projection_does_not_veto_exact_input_ready_runtime(

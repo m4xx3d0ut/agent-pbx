@@ -587,12 +587,33 @@ class IdleTargetDeliveryService:
             metadata.get("cwd"),
         )
         mapped_workspace = str(mapping.get("cwd") or "").strip()
-        workspace_digest = str(
-            metadata.get("operator_workspace_set_digest") or ""
-        ).strip().lower()
-        authority_profile = str(
-            metadata.get("operator_authority_profile") or ""
-        ).strip()
+        agent_type = str(agent.get("agent_type") or "caller").strip().lower()
+        if agent_type == "operator":
+            workspace_digest = str(
+                metadata.get("operator_workspace_set_digest") or ""
+            ).strip().lower()
+            authority_profile = str(
+                metadata.get("operator_authority_profile") or ""
+            ).strip()
+        else:
+            # Caller Agents do not have an Operator authority profile or
+            # workspace-set receipt.  Their exact managed runtime is still
+            # safely bound by entity, project, cwd, Codex session, pane,
+            # process start time, and runtime generation.  Derive the caller
+            # workspace identity from that durable scope instead of requiring
+            # nonsensical Operator-only metadata.
+            authority_profile = "caller-runtime"
+            workspace_digest = hashlib.sha256(
+                json.dumps(
+                    {
+                        "entity_id": entity_id,
+                        "project": str(agent.get("project") or "").strip(),
+                        "workspace_path": workspace_path,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
         required = {
             "codex_session_id": codex_session_id,
             "mapped_codex_session_id": mapped_session_id,
@@ -629,7 +650,7 @@ class IdleTargetDeliveryService:
             raise _ClassifiedDeliveryError(
                 IdleTargetDeliveryOutcome.BLOCKED,
                 "workspace_identity_unavailable",
-                "operator workspace-set identity is unavailable",
+                "managed workspace identity is unavailable",
             )
         try:
             pane_pid = int(mapping.get("pane_pid") or 0)
