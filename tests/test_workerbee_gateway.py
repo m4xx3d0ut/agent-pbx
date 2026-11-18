@@ -19,6 +19,8 @@ from fastapi.testclient import TestClient
 from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
 from agent_pbx import workerbee_direct_bind as direct_bind
+from agent_pbx.schemas import AgentRegisterRequest
+from agent_pbx.workerbee_application import WorkerBeeBindingProjectionService
 from agent_pbx.workerbee_gateway import (
     WORKERBEE_GATEWAY_V2_API_VERSION,
     WORKERBEE_MUTATING_TOOLS,
@@ -292,6 +294,184 @@ def test_gateway_lease_is_private_and_scoped_to_binding(tmp_path: Path) -> None:
     with pytest.raises(WorkerBeeGatewayError) as wrong_token:
         gateway.validate(lease.lease_id, "wrong")
     assert wrong_token.value.code == "WORKERBEE_GATEWAY_AUTH_FAILED"
+
+
+def test_gateway_successor_and_startup_reconciliation_keep_one_current_lease(
+    tmp_path: Path,
+) -> None:
+    _runtime, _workspace, binding, gateway = services(tmp_path)
+    first, first_token = gateway.issue(
+        agent_id="agent-1",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+    current, _current_token = gateway.issue(
+        agent_id="agent-1",
+        codex_session_id="thread-2",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+    orphan, _orphan_token = gateway.issue(
+        agent_id="agent-2",
+        codex_session_id="thread-3",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+
+    revoked = gateway.revoke_superseded_for_agent(
+        "agent-1", keep_lease_id=current.lease_id
+    )
+
+    assert [item.lease_id for item in revoked] == [first.lease_id]
+    with pytest.raises(WorkerBeeGatewayError) as predecessor:
+        gateway.validate(first.lease_id, first_token)
+    assert predecessor.value.code == "WORKERBEE_GATEWAY_LEASE_REVOKED"
+    repaired = gateway.reconcile_active_references(
+        {"agent-1": current.lease_id}
+    )
+    assert repaired["kept_lease_ids"] == [current.lease_id]
+    assert repaired["revoked_lease_ids"] == [orphan.lease_id]
+    assert [item.lease_id for item in gateway.active_leases()] == [current.lease_id]
+
+
+def test_app_startup_repairs_historical_active_gateway_duplicates(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    git_repo(repo)
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+    selected = app.state.workerbee_runtime.observe(
+        {
+            "backend": "oss",
+            "endpoint": "http://127.0.0.1:8765/mcp",
+            "server_name": "K1S WorkerBee",
+            "server_version": "1.30.0",
+        }
+    )
+    binding = app.state.workerbee_workspaces.prepare(
+        runtime=selected,
+        project="demo",
+        source_root=repo,
+    )
+    app.state.store.register_agent(
+        AgentRegisterRequest(
+            agent_id="demo-agent",
+            project="demo",
+            metadata={"cwd": str(repo)},
+        )
+    )
+    predecessor, _predecessor_token = app.state.workerbee_gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-1",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+    current, _current_token = app.state.workerbee_gateway.issue(
+        agent_id="demo-agent",
+        codex_session_id="thread-2",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+    app.state.store.merge_agent_metadata(
+        "demo-agent",
+        {"workerbee_gateway_lease_id": current.lease_id},
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/v1/agents").status_code == 200
+
+    assert app.state.workerbee_gateway.load(predecessor.lease_id).status == "revoked"
+    assert app.state.workerbee_gateway.load(current.lease_id).status == "active"
+    events = app.state.store.list_events(limit=20)
+    repaired = next(
+        item for item in events if item["type"] == "workerbee_gateway_startup_reconciled"
+    )
+    assert repaired["payload"]["revoked_count"] == 1
+    assert repaired["payload"]["kept_count"] == 1
+
+
+def test_binding_projection_updates_agent_and_operator_fork_records(
+    tmp_path: Path,
+) -> None:
+    _runtime, _workspace, binding, gateway = services(tmp_path)
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-1",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"agent_type": "operator", "operator_role": "root"},
+        )
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={"cwd": str(binding.source_root), "codex_session_id": "source-1"},
+        )
+    )
+    fork_agent_id = "operator-1-fork-caller-1"
+    stale = {
+        "agent_type": "operator",
+        "operator_role": "fork",
+        "logical_operator_id": "operator-1",
+        "source_caller_agent_id": "caller-1",
+        "source_codex_session_id": "source-1",
+        "workerbee_workspace_binding_id": "binding-stale",
+        "workerbee_runtime_workspace_path": "/workspace/stale",
+    }
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id=fork_agent_id,
+            project="demo",
+            agent_type="operator",
+            metadata={**stale, "cwd": str(binding.source_root)},
+        )
+    )
+    store.create_operator_fork(
+        logical_operator_agent_id="operator-1",
+        fork_agent_id=fork_agent_id,
+        source_caller_agent_id="caller-1",
+        source_codex_session_id="source-1",
+        cwd=str(binding.source_root),
+        metadata=stale,
+    )
+    lease, _token = gateway.issue(
+        agent_id=fork_agent_id,
+        codex_session_id="fork-thread",
+        profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        workspace_binding_id=binding.binding_id,
+    )
+    store.merge_agent_metadata(
+        fork_agent_id,
+        {"workerbee_gateway_lease_id": lease.lease_id},
+    )
+    store.merge_operator_fork_metadata(
+        fork_agent_id,
+        {"workerbee_gateway_lease_id": lease.lease_id},
+    )
+
+    projected = WorkerBeeBindingProjectionService(store).reconcile(
+        lease,
+        binding,
+        event_type="workerbee_binding_reconciled",
+    )
+    fork = store.get_operator_fork_for_agent(fork_agent_id)
+
+    assert projected["metadata"]["workerbee_workspace_binding_id"] == binding.binding_id
+    assert projected["metadata"]["workerbee_workspace_source_root"] == str(
+        binding.source_root
+    )
+    assert projected["metadata"]["workerbee_runtime_workspace_path"] == (
+        binding.runtime_workspace_path
+    )
+    assert fork is not None
+    assert fork["metadata"]["workerbee_workspace_binding_id"] == binding.binding_id
+    assert fork["metadata"]["workerbee_runtime_workspace_path"] == (
+        binding.runtime_workspace_path
+    )
 
 
 def test_gateway_rejects_path_domain_receipt_drift_and_migrates_v2(
@@ -1127,8 +1307,32 @@ def test_gateway_api_prepares_workspace_and_issues_one_time_token(
         ).read_text(encoding="utf-8")
         assert lease_payload["token"] not in receipt
 
+        successor = client.post(
+            "/v2/agents/demo-agent/workerbee/leases",
+            json={
+                "codex_session_id": "thread-2",
+                "profile": "local-deploy",
+                "workspace_binding_id": binding["binding_id"],
+            },
+        )
+        assert successor.status_code == 200
+        successor_payload = successor.json()
+        assert successor_payload["lease"]["lease_id"] != (
+            lease_payload["lease"]["lease_id"]
+        )
+        assert app.state.workerbee_gateway.load(
+            lease_payload["lease"]["lease_id"]
+        ).status == "revoked"
+        metadata = app.state.store.get_agent("demo-agent")["metadata"]
+        assert metadata["workerbee_gateway_lease_id"] == (
+            successor_payload["lease"]["lease_id"]
+        )
+        assert [
+            item.lease_id for item in app.state.workerbee_gateway.active_leases()
+        ] == [successor_payload["lease"]["lease_id"]]
+
         revoked = client.delete(
-            f"/v2/agents/demo-agent/workerbee/leases/{lease_payload['lease']['lease_id']}"
+            f"/v2/agents/demo-agent/workerbee/leases/{successor_payload['lease']['lease_id']}"
         )
         assert revoked.status_code == 200
         assert revoked.json()["status"] == "revoked"
@@ -1818,7 +2022,10 @@ def test_gateway_api_requires_explicit_access_profile_and_restart(tmp_path: Path
         assert platform_readback.json()["selected_backend"] == "platform_debug"
         assert platform_readback.json()["tool_surface_contract"][
             "reviewed_optional_tools"
-        ] == catalog_fixture["platform_debug_reviewed_optional_tools"]
+        ] == [
+            *catalog_fixture["platform_debug_paas_control_plane_tools"],
+            *catalog_fixture["platform_debug_reviewed_optional_tools"],
+        ]
 
 
 @pytest.mark.parametrize(

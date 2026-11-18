@@ -354,6 +354,17 @@ class WorkerBeeAccessPolicyService:
                 "WORKERBEE_ACCESS_AGENT_NOT_FOUND",
                 "Agent is no longer registered.",
             )
+        self.store.merge_operator_fork_metadata(
+            agent_id,
+            {
+                "workerbee_mcp_profile": selected,
+                "workerbee_mcp_profile_updated_by": str(updated_by or "local"),
+                WORKERBEE_PROFILE_CEILING_METADATA_KEY: str(
+                    posture["profile_ceiling"]
+                ),
+                WORKERBEE_PROFILE_INTENT_METADATA_KEY: intent.public_dict(),
+            },
+        )
         result = self.get_profile(agent_id)
         result["changed"] = current["requested_profile"] != selected
         return result
@@ -502,6 +513,7 @@ class WorkerBeeAccessPolicyService:
                 "WORKERBEE_ACCESS_AGENT_NOT_FOUND",
                 "Agent is no longer registered.",
             )
+        self.store.merge_operator_fork_metadata(agent_id, changes)
         result = self.get_profile(agent_id)
         result["changed"] = any(
             (

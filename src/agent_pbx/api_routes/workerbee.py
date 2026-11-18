@@ -34,7 +34,11 @@ from ..schemas import (
     WorkerBeeWorkspaceTransitionRequest,
 )
 from ..workerbee import agent_cwd
-from ..workerbee_application import WorkerBeeApplicationService
+from ..workerbee_application import (
+    WORKERBEE_BINDING_TRANSITION_METADATA_KEYS,
+    WorkerBeeApplicationService,
+    workerbee_binding_projection,
+)
 from ..workerbee_access import WorkerBeeAccessPolicyError
 from ..workerbee_controlled_run import WorkerBeeControlledRunError
 from ..workerbee_gateway import WorkerBeeGatewayError
@@ -1194,35 +1198,13 @@ def register_workerbee_routes(
                 request.app.state.workerbee_workspaces.load,
                 lease.workspace_binding_id,
             )
-            await asyncio.to_thread(
+            projection = workerbee_binding_projection(lease, binding)
+            projection["workerbee_mcp_profile"] = lease.profile
+            updated = await asyncio.to_thread(
                 store.merge_agent_metadata,
                 agent_id,
-                {
-                    "workerbee_gateway_lease_id": lease.lease_id,
-                    "workerbee_workspace_binding_id": lease.workspace_binding_id,
-                    "workerbee_workspace_project": lease.project,
-                    "workerbee_workspace_working_subpath": lease.working_subpath,
-                    "workerbee_backend": lease.backend,
-                    "workerbee_backend_generation": lease.backend_generation,
-                    "workerbee_path_domain_receipt_sha256": (
-                        binding.path_domain.receipt_sha256
-                    ),
-                    "workerbee_workspace_policy_digest": (
-                        binding.path_domain.workspace_policy_digest
-                    ),
-                    "workerbee_host_source_root": (
-                        binding.path_domain.host_source_root
-                    ),
-                    "workerbee_allowed_host_root": (
-                        binding.path_domain.allowed_host_root
-                    ),
-                    "workerbee_container_target_root": (
-                        binding.path_domain.container_target_root
-                    ),
-                    "workerbee_runtime_workspace_path": (
-                        binding.path_domain.runtime_workspace_path
-                    ),
-                },
+                projection,
+                clear_metadata_keys=WORKERBEE_BINDING_TRANSITION_METADATA_KEYS,
                 event_type="workerbee_gateway_lease_issued",
                 event_payload={
                     "agent_id": agent_id,
@@ -1236,6 +1218,42 @@ def register_workerbee_routes(
                         binding.path_domain.workspace_policy_digest
                     ),
                 },
+            )
+            if updated is None:
+                await asyncio.to_thread(
+                    request.app.state.workerbee_gateway.revoke,
+                    lease.lease_id,
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "WORKERBEE_ACCESS_AGENT_NOT_FOUND",
+                        "message": "Agent disappeared while persisting its WorkerBee lease.",
+                        "remediation": "Register the Agent and prepare a fresh lease.",
+                    },
+                )
+            await asyncio.to_thread(
+                store.merge_operator_fork_metadata,
+                agent_id,
+                projection,
+                clear_metadata_keys=WORKERBEE_BINDING_TRANSITION_METADATA_KEYS,
+            )
+        revoked = await asyncio.to_thread(
+            request.app.state.workerbee_gateway.revoke_superseded_for_agent,
+            agent_id,
+            keep_lease_id=lease.lease_id,
+        )
+        if revoked:
+            await asyncio.to_thread(
+                store.append_event,
+                "workerbee_gateway_predecessors_revoked",
+                {
+                    "agent_id": agent_id,
+                    "current_lease_id": lease.lease_id,
+                    "revoked_lease_ids": [item.lease_id for item in revoked],
+                    "revoked_count": len(revoked),
+                },
+                agent_id,
             )
         gateway_url = (
             str(request.base_url).rstrip("/") + f"/workerbee-mcp/{lease.lease_id}"

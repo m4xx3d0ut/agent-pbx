@@ -7,6 +7,7 @@ import pytest
 
 from agent_pbx.workerbee_modes import (
     WORKERBEE_CAPABILITY_FAMILY_TOOLS,
+    WORKERBEE_BACKEND_UNIVERSAL_OPTIONAL_TOOLS,
     WORKERBEE_FAMILY_EXPORT,
     WORKERBEE_FAMILY_RUNTIME_OBSERVE,
     WORKERBEE_HIGH_RISK_TOOLS,
@@ -197,6 +198,7 @@ def test_platform_debug_optional_surface_is_reviewed_without_changing_public_req
     catalog = [
         *fixture["oss_tools"],
         *fixture["platform_debug_reviewed_optional_tools"],
+        *fixture["platform_debug_paas_control_plane_tools"],
         *fixture["platform_debug_quarantined_extensions"],
     ]
 
@@ -207,10 +209,11 @@ def test_platform_debug_optional_surface_is_reviewed_without_changing_public_req
     )
 
     assert surface.compatible is True
-    assert surface.effective_optional_tools == (
+    assert set(surface.effective_optional_tools) == {
+        *fixture["platform_debug_paas_control_plane_tools"],
         "workerbee_v1_runtime_policy_status",
         "workerbee_v1_ingress_route_apply",
-    )
+    }
     assert set(surface.effective_tools) == set(
         reviewed_tools_for_access_profile(
             WORKERBEE_PROFILE_TRUSTED_WORKBENCH, "platform_debug"
@@ -222,6 +225,60 @@ def test_platform_debug_optional_surface_is_reviewed_without_changing_public_req
     assert not set(fixture["platform_debug_quarantined_extensions"]).intersection(
         surface.effective_tools
     )
+
+
+@pytest.mark.parametrize(
+    "profile",
+    (
+        WORKERBEE_PROFILE_REVIEW,
+        "observe-local",
+        WORKERBEE_PROFILE_LOCAL_DEPLOY,
+        WORKERBEE_PROFILE_TRUSTED_WORKBENCH,
+    ),
+)
+def test_platform_debug_paas_control_plane_is_reviewed_for_every_profile(
+    profile: str,
+) -> None:
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "workerbee_tool_catalogs_rc2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    catalog = [
+        *fixture["oss_tools"],
+        *fixture["platform_debug_reviewed_optional_tools"],
+        *fixture["platform_debug_paas_control_plane_tools"],
+    ]
+
+    surface = resolve_workerbee_tool_surface(
+        profile,
+        catalog,
+        backend="platform_debug",
+    )
+
+    assert len(WORKERBEE_BACKEND_UNIVERSAL_OPTIONAL_TOOLS["platform_debug"]) == 38
+    assert set(fixture["platform_debug_paas_control_plane_tools"]).issubset(
+        surface.effective_tools
+    )
+    assert not set(fixture["platform_debug_paas_control_plane_tools"]).intersection(
+        surface.unknown_backend_tools
+    )
+    assert surface.catalog_fully_reviewed is True
+
+
+def test_user_appliance_uses_the_same_reviewed_paas_control_plane_contract() -> None:
+    debug = WORKERBEE_BACKEND_UNIVERSAL_OPTIONAL_TOOLS["platform_debug"]
+    user = WORKERBEE_BACKEND_UNIVERSAL_OPTIONAL_TOOLS["user_appliance"]
+
+    assert user == debug
+    assert len(user) == 38
+    surface = resolve_workerbee_tool_surface(
+        WORKERBEE_PROFILE_REVIEW,
+        user,
+        backend="user_appliance",
+    )
+    assert set(user).issubset(surface.effective_tools)
+    assert surface.unknown_backend_tools == ()
 
 
 @pytest.mark.parametrize(

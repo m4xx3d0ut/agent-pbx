@@ -226,6 +226,7 @@ class WorkerBeeGatewayService:
         self.binding_validated = binding_validated
         self.workspace_policy = workspace_policy
         self.snapshot_policy = snapshot_policy
+        self._lease_lock = threading.RLock()
         self._mutation_lock = threading.Lock()
         self._active_mutations: dict[str, int] = {}
 
@@ -297,7 +298,8 @@ class WorkerBeeGatewayService:
             source_project=binding.project,
             working_subpath=".",
         )
-        _atomic_private_json(self._lease_path(lease_id), lease.private_dict())
+        with self._lease_lock:
+            _atomic_private_json(self._lease_path(lease_id), lease.private_dict())
         return lease, token
 
     def load(self, lease_id: str) -> WorkerBeeGatewayLease:
@@ -446,30 +448,89 @@ class WorkerBeeGatewayService:
         return lease, binding
 
     def revoke(self, lease_id: str) -> WorkerBeeGatewayLease:
-        lease = self.load(lease_id)
-        if lease.revoked_at is not None:
-            return lease
-        updated = WorkerBeeGatewayLease(
-            **{
-                **asdict(lease),
-                "status": "revoked",
-                "revoked_at": self.clock(),
-            }
-        )
-        _atomic_private_json(self._lease_path(lease_id), updated.private_dict())
-        return updated
+        with self._lease_lock:
+            lease = self.load(lease_id)
+            if lease.revoked_at is not None:
+                return lease
+            updated = WorkerBeeGatewayLease(
+                **{
+                    **asdict(lease),
+                    "status": "revoked",
+                    "revoked_at": self.clock(),
+                }
+            )
+            _atomic_private_json(self._lease_path(lease_id), updated.private_dict())
+            return updated
+
+    def active_leases(self) -> tuple[WorkerBeeGatewayLease, ...]:
+        """Return active lease records in deterministic creation order."""
+
+        leases: list[WorkerBeeGatewayLease] = []
+        root = self.state_root / "leases"
+        with self._lease_lock:
+            if root.is_dir():
+                for path in sorted(root.glob("*.json")):
+                    try:
+                        lease = self.load(path.stem)
+                    except WorkerBeeGatewayError:
+                        continue
+                    if lease.status == "active" and lease.revoked_at is None:
+                        leases.append(lease)
+        return tuple(sorted(leases, key=lambda item: (item.created_at, item.lease_id)))
+
+    def revoke_superseded_for_agent(
+        self,
+        agent_id: str,
+        *,
+        keep_lease_id: str,
+    ) -> tuple[WorkerBeeGatewayLease, ...]:
+        """Revoke every active predecessor for one durable Agent lease."""
+
+        target = self._identity(agent_id, "agent_id")
+        keep = self._identity(keep_lease_id, "keep_lease_id")
+        revoked: list[WorkerBeeGatewayLease] = []
+        with self._lease_lock:
+            for lease in self.active_leases():
+                if lease.agent_id == target and lease.lease_id != keep:
+                    revoked.append(self.revoke(lease.lease_id))
+        return tuple(revoked)
+
+    def reconcile_active_references(
+        self,
+        current_by_agent: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """Revoke active leases not named by their Agent's durable record."""
+
+        normalized = {
+            str(agent_id).strip(): str(lease_id).strip()
+            for agent_id, lease_id in current_by_agent.items()
+            if str(agent_id).strip() and str(lease_id).strip()
+        }
+        kept: list[str] = []
+        revoked: list[str] = []
+        expired: list[str] = []
+        now = self.clock()
+        with self._lease_lock:
+            for lease in self.active_leases():
+                is_expired = lease.expires_at is not None and now >= lease.expires_at
+                if not is_expired and normalized.get(lease.agent_id) == lease.lease_id:
+                    kept.append(lease.lease_id)
+                    continue
+                self.revoke(lease.lease_id)
+                revoked.append(lease.lease_id)
+                if is_expired:
+                    expired.append(lease.lease_id)
+        return {
+            "active_before": len(kept) + len(revoked),
+            "kept_count": len(kept),
+            "revoked_count": len(revoked),
+            "expired_count": len(expired),
+            "kept_lease_ids": kept,
+            "revoked_lease_ids": revoked,
+        }
 
     def impact(self) -> dict[str, Any]:
-        leases: list[dict[str, Any]] = []
-        root = self.state_root / "leases"
-        if root.is_dir():
-            for path in sorted(root.glob("*.json")):
-                try:
-                    lease = self.load(path.stem)
-                except WorkerBeeGatewayError:
-                    continue
-                if lease.status == "active" and lease.revoked_at is None:
-                    leases.append(lease.public_dict())
+        leases = [lease.public_dict() for lease in self.active_leases()]
         with self._mutation_lock:
             mutations = dict(self._active_mutations)
         return {

@@ -113,6 +113,57 @@ WORKERBEE_BACKEND_OPTIONAL_FAMILY_TOOLS: Mapping[
     },
 }
 
+# The appliance PaaS surface is a backend control-plane contract rather than a
+# local runtime authority tier.  Every Agent PBX WorkerBee profile needs to be
+# able to discover and call these tools so that WorkerBee can apply its own
+# tenant/RBAC, explicit live-operation opt-ins, and provider policy.  Keeping
+# these tools backend-optional preserves OSS compatibility while avoiding an
+# Agent PBX-side quarantine of valid appliance capabilities.
+WORKERBEE_PAAS_CONTROL_PLANE_TOOLS = (
+    "workerbee_v1_workspace_binding_release",
+    "workerbee_v1_workspace_start",
+    "workerbee_v1_workspace_list",
+    "workerbee_v1_workspace_status",
+    "workerbee_v1_workspace_release",
+    "workerbee_v1_workspace_promote",
+    "workerbee_v1_workspace_review_request",
+    "workerbee_v1_workspace_review_record",
+    "workerbee_v1_workspace_review_status",
+    "workerbee_v1_workspace_review_evidence_collect",
+    "workerbee_v1_workspace_review_evidence_status",
+    "workerbee_v1_cloud_account_status",
+    "workerbee_v1_cloud_tenant_record",
+    "workerbee_v1_cloud_marketplace_account_record",
+    "workerbee_v1_cloud_entitlement_record",
+    "workerbee_v1_cloud_account_usage_status",
+    "workerbee_v1_cloud_usage_report",
+    "workerbee_v1_cloud_usage_flush",
+    "workerbee_v1_cloud_usage_submit",
+    "workerbee_v1_cloud_usage_queue_status",
+    "workerbee_v1_cloud_usage_retry",
+    "workerbee_v1_cloud_marketplace_preflight",
+    "workerbee_v1_cloud_kms_preflight",
+    "workerbee_v1_cloud_kms_lifecycle_validate",
+    "workerbee_v1_cloud_kms_lifecycle_execute",
+    "workerbee_v1_cloud_vpc_runner_preflight",
+    "workerbee_v1_cloud_vpc_runner_provision",
+    "workerbee_v1_cloud_snapshot_upload_preflight",
+    "workerbee_v1_cloud_snapshot_upload",
+    "workerbee_v1_cloud_tunnel_execution_preflight",
+    "workerbee_v1_cloud_tunnel_execution",
+    "workerbee_v1_cloud_provider_test",
+    "workerbee_v1_cloud_readiness",
+    "workerbee_v1_cloud_saas_validate",
+    "workerbee_v1_cloud_stack_validate",
+    "workerbee_v1_cloud_stack_handoff",
+    "workerbee_v1_cloud_marketplace_evidence_package",
+    "workerbee_v1_cloud_stack_image_publish",
+)
+WORKERBEE_BACKEND_UNIVERSAL_OPTIONAL_TOOLS: Mapping[str, tuple[str, ...]] = {
+    "platform_debug": WORKERBEE_PAAS_CONTROL_PLANE_TOOLS,
+    "user_appliance": WORKERBEE_PAAS_CONTROL_PLANE_TOOLS,
+}
+
 WORKERBEE_PROFILE_FAMILIES: Mapping[str, tuple[str, ...]] = {
     WORKERBEE_PROFILE_REVIEW: (
         WORKERBEE_FAMILY_RUNTIME_OBSERVE,
@@ -353,7 +404,9 @@ def optional_tools_for_access_profile(profile: object, backend: object) -> tuple
     optional_by_family = WORKERBEE_BACKEND_OPTIONAL_FAMILY_TOOLS.get(
         selected_backend, {}
     )
-    result: list[str] = []
+    result: list[str] = list(
+        WORKERBEE_BACKEND_UNIVERSAL_OPTIONAL_TOOLS.get(selected_backend, ())
+    )
     for family in capability_families_for_profile(selected_profile):
         result.extend(optional_by_family.get(family, ()))
     return tuple(dict.fromkeys(result))
@@ -417,6 +470,10 @@ def resolve_workerbee_tool_surface(
         tool
         for backend_families in WORKERBEE_BACKEND_OPTIONAL_FAMILY_TOOLS.values()
         for tools in backend_families.values()
+        for tool in tools
+    } | {
+        tool
+        for tools in WORKERBEE_BACKEND_UNIVERSAL_OPTIONAL_TOOLS.values()
         for tool in tools
     } | set(WORKERBEE_HIGH_RISK_TOOLS)
     unknown = tuple(sorted(available_set - known))

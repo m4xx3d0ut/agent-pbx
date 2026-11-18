@@ -229,6 +229,74 @@ def test_trusted_workbench_requires_raised_ceiling_and_supports_local_label(
     assert "local-exec" in result["requested_capability_families"]
 
 
+def test_access_profile_update_persists_across_operator_fork_hydration(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="operator-1",
+            project="agent-pbx-operator",
+            agent_type="operator",
+            metadata={"agent_type": "operator", "operator_role": "root"},
+        )
+    )
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="caller-1",
+            project="demo",
+            metadata={"cwd": str(tmp_path), "codex_session_id": "source-1"},
+        )
+    )
+    fork_agent_id = "operator-1-fork-caller-1"
+    fork_metadata = {
+        "agent_type": "operator",
+        "operator_role": "fork",
+        "logical_operator_id": "operator-1",
+        "source_caller_agent_id": "caller-1",
+        "source_codex_session_id": "source-1",
+        "workerbee_mcp_profile": "local-deploy",
+        "workerbee_workspace_policy_digest": "a" * 64,
+    }
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id=fork_agent_id,
+            project="demo",
+            agent_type="operator",
+            metadata={**fork_metadata, "cwd": str(tmp_path)},
+        )
+    )
+    store.create_operator_fork(
+        logical_operator_agent_id="operator-1",
+        fork_agent_id=fork_agent_id,
+        source_caller_agent_id="caller-1",
+        source_codex_session_id="source-1",
+        cwd=str(tmp_path),
+        metadata=fork_metadata,
+    )
+    service = WorkerBeeAccessPolicyService(
+        store,
+        environ={
+            "AGENT_PBX_WORKERBEE_ACCESS_PROFILE_CEILING": "trusted-workbench",
+        },
+    )
+
+    result = service.set_profile(
+        fork_agent_id,
+        profile="trusted-workbench",
+        updated_by="test",
+    )
+    fork = store.get_operator_fork_for_agent(fork_agent_id)
+
+    assert result["effective_profile"] == "trusted-workbench"
+    assert store.get_agent(fork_agent_id)["metadata"]["workerbee_mcp_profile"] == (
+        "trusted-workbench"
+    )
+    assert fork is not None
+    assert fork["metadata"]["workerbee_mcp_profile"] == "trusted-workbench"
+
+
 def test_trusted_direct_bind_is_excluded_from_default_source_ceiling(
     tmp_path: Path,
 ) -> None:

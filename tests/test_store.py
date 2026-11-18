@@ -408,6 +408,87 @@ def test_register_agent_merges_metadata_without_dropping_cwd(tmp_path: Path) -> 
     }
 
 
+def test_register_agent_cannot_roll_back_controller_workerbee_metadata(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="agent-1",
+            project="demo",
+            metadata={"cwd": str(tmp_path), "workerbee_mcp_profile": "local-deploy"},
+        )
+    )
+    store.merge_agent_metadata(
+        "agent-1",
+        {
+            "workerbee_mcp_profile": "trusted-workbench",
+            "workerbee_mcp_profile_updated_by": "controller",
+            "workerbee_gateway_lease_id": "lease-current",
+            "workerbee_workspace_binding_id": "binding-current",
+            "workerbee_workspace_source_root": str(tmp_path / "current"),
+            "workerbee_runtime_workspace_path": "/workspace/current",
+        },
+    )
+
+    agent = store.register_agent(
+        AgentRegisterRequest(
+            agent_id="agent-1",
+            project="demo",
+            metadata={
+                "pbx_mode": "report",
+                "workerbee_mcp_profile": "local-deploy",
+                "workerbee_gateway_lease_id": "lease-stale",
+                "workerbee_workspace_binding_id": "binding-stale",
+                "workerbee_workspace_source_root": str(tmp_path / "stale"),
+                "workerbee_runtime_workspace_path": "/workspace/stale",
+            },
+        )
+    )
+
+    assert agent["metadata"]["pbx_mode"] == "report"
+    assert agent["metadata"]["workerbee_mcp_profile"] == "trusted-workbench"
+    assert agent["metadata"]["workerbee_gateway_lease_id"] == "lease-current"
+    assert agent["metadata"]["workerbee_workspace_binding_id"] == "binding-current"
+    assert agent["metadata"]["workerbee_workspace_source_root"] == str(
+        tmp_path / "current"
+    )
+    assert agent["metadata"]["workerbee_runtime_workspace_path"] == (
+        "/workspace/current"
+    )
+
+
+def test_controller_metadata_merge_can_clear_transition_fields(tmp_path: Path) -> None:
+    store = Store(tmp_path / "pbx.sqlite")
+    store.init()
+    store.register_agent(
+        AgentRegisterRequest(
+            agent_id="agent-1",
+            project="demo",
+            metadata={
+                "cwd": str(tmp_path),
+                "workerbee_workspace_scenario": "old-scenario",
+                "workerbee_workspace_previous_binding_id": "old-binding",
+            },
+        )
+    )
+
+    agent = store.merge_agent_metadata(
+        "agent-1",
+        {"workerbee_workspace_binding_id": "new-binding"},
+        clear_metadata_keys=(
+            "workerbee_workspace_scenario",
+            "workerbee_workspace_previous_binding_id",
+        ),
+    )
+
+    assert agent is not None
+    assert agent["metadata"]["workerbee_workspace_binding_id"] == "new-binding"
+    assert "workerbee_workspace_scenario" not in agent["metadata"]
+    assert "workerbee_workspace_previous_binding_id" not in agent["metadata"]
+
+
 def test_merge_agent_metadata_journals_controller_update_atomically(
     tmp_path: Path,
 ) -> None:

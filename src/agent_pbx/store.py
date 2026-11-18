@@ -97,6 +97,40 @@ ROOT_OPERATOR_SOURCE_KEYS = (
     "default_source_caller_project",
     "default_source_codex_session_id",
 )
+WORKERBEE_CONTROLLER_METADATA_KEYS = (
+    "workerbee_mcp_profile",
+    "workerbee_mcp_profile_updated_by",
+    "workerbee_profile_intent",
+    "workerbee_policy_updated_by",
+    "workerbee_access_profile_ceiling",
+    "workerbee_source_mode",
+    "workerbee_execution_lane",
+    "workerbee_gateway_lease_id",
+    "workerbee_workspace_binding_id",
+    "workerbee_workspace_project",
+    "workerbee_workspace_working_subpath",
+    "workerbee_workspace_source_root",
+    "workerbee_workspace_previous_binding_id",
+    "workerbee_workspace_refreshed_at",
+    "workerbee_workspace_scenario",
+    "workerbee_bound_backend",
+    "workerbee_backend",
+    "workerbee_backend_generation",
+    "workerbee_binding_state",
+    "workerbee_path_domain_receipt_sha256",
+    "workerbee_workspace_policy_digest",
+    "workerbee_host_source_root",
+    "workerbee_allowed_host_root",
+    "workerbee_container_target_root",
+    "workerbee_runtime_workspace_path",
+)
+WORKERBEE_CONTROLLER_AUTHORITY_MARKERS = (
+    "workerbee_gateway_lease_id",
+    "workerbee_profile_intent",
+    "workerbee_mcp_profile_updated_by",
+    "workerbee_policy_updated_by",
+    "workerbee_path_domain_receipt_sha256",
+)
 OPERATOR_TERMINAL_BASE_STATES = (
     "done",
     "complete",
@@ -1780,6 +1814,16 @@ class Store:
                 else "caller"
             )
             existing_metadata = self._json_object(existing["metadata_json"]) if existing else {}
+            if any(
+                existing_metadata.get(key)
+                for key in WORKERBEE_CONTROLLER_AUTHORITY_MARKERS
+            ):
+                # Registration payloads are launch observations, not policy
+                # authority.  Preserve the controller-issued WorkerBee lease,
+                # profile, and path projection when a resumed Codex session
+                # re-registers with stale launch-time metadata.
+                for key in WORKERBEE_CONTROLLER_METADATA_KEYS:
+                    request_metadata.pop(key, None)
             existing_operator_role = (
                 str(existing_metadata.get("operator_role") or "").strip().lower()
             )
@@ -2203,6 +2247,7 @@ class Store:
         agent_id: str,
         metadata: Mapping[str, Any],
         *,
+        clear_metadata_keys: Iterable[str] = (),
         event_type: str | None = None,
         event_payload: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
@@ -2220,6 +2265,8 @@ class Store:
                 row["metadata_json"],
                 dict(metadata),
             )
+            for key in clear_metadata_keys:
+                merged.pop(str(key), None)
             conn.execute(
                 "UPDATE agents SET metadata_json = ? WHERE agent_id = ?",
                 (json.dumps(merged), agent_id),
@@ -2243,6 +2290,8 @@ class Store:
         self,
         fork_agent_id: str,
         metadata: Mapping[str, Any],
+        *,
+        clear_metadata_keys: Iterable[str] = (),
     ) -> dict[str, Any] | None:
         """Merge controller policy into the durable fork record, if present.
 
@@ -2269,6 +2318,8 @@ class Store:
                 row["metadata_json"],
                 dict(metadata),
             )
+            for key in clear_metadata_keys:
+                merged.pop(str(key), None)
             conn.execute(
                 """
                 UPDATE operator_forks

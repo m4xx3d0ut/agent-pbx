@@ -338,6 +338,38 @@ def create_app(
         async with AsyncExitStack() as stack:
             await stack.enter_async_context(mcp_server.session_manager.run())
             await stack.enter_async_context(workerbee_gateway_app.session_manager.run())
+            reconcile_gateway_leases = getattr(
+                app.state.workerbee_gateway,
+                "reconcile_active_references",
+                None,
+            )
+            if callable(reconcile_gateway_leases):
+                agents = await asyncio.to_thread(
+                    store.list_agents,
+                    include_hidden=True,
+                )
+                current_workerbee_leases = {
+                    str(agent.get("agent_id") or "").strip(): str(
+                        (
+                            agent.get("metadata")
+                            if isinstance(agent.get("metadata"), dict)
+                            else {}
+                        ).get("workerbee_gateway_lease_id")
+                        or ""
+                    ).strip()
+                    for agent in agents
+                }
+                lease_repair = await asyncio.to_thread(
+                    reconcile_gateway_leases,
+                    current_workerbee_leases,
+                )
+                if int(lease_repair.get("revoked_count") or 0):
+                    await asyncio.to_thread(
+                        store.append_event,
+                        "workerbee_gateway_startup_reconciled",
+                        lease_repair,
+                        "workerbee-gateway",
+                    )
             smoke_task: asyncio.Task[None] | None = None
             joplin_sync_task: asyncio.Task[None] | None = None
             if resolved_config.debug_smoke:
