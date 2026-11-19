@@ -22612,7 +22612,9 @@ async def test_tui_start_operator_from_caller_launches_codex_fork(
             gets.append({"path": path, **kwargs})
             if path == "/v1/auth/check":
                 return Response({"ok": True})
-            if path == "/v2/workerbee/workspace-policy":
+            if path.startswith("/v2/agents/operator-0") and path.endswith(
+                "/workerbee/workspace-policy"
+            ):
                 return Response(
                     {
                         "access_posture": {

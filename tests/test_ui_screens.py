@@ -1717,7 +1717,14 @@ async def test_extracted_workerbee_switch_preserves_confirmation_and_worker_hook
     transaction = {
         "transaction_id": "a" * 24,
         "target": "platform_debug",
-        "before": {"backend": "oss"},
+        "before": {"backend": "oss", "generation": 4, "instance_id": "oss-instance"},
+        "target_runtime": {
+            "backend": "platform_debug",
+            "generation": 5,
+            "instance_id": "debug-instance",
+            "source_mode": "snapshot-import",
+            "fingerprint": "b" * 64,
+        },
     }
     workers: list[tuple[object, str, bool]] = []
 
@@ -1740,9 +1747,11 @@ async def test_extracted_workerbee_switch_preserves_confirmation_and_worker_hook
         assert str(
             screen.query_one("#workerbee-switch-summary", Static).renderable
         ) == (
-            "Current: oss\n"
-            "Target: platform_debug\n"
-            "Existing Codex sessions remain pinned; this affects future sessions.\n"
+            f"Transaction: {'a' * 24}\n"
+            "Current: oss g4 instance oss-instance\n"
+            "Target: platform_debug g5 instance debug-instance · snapshot-import\n"
+            f"Target fingerprint: {'b' * 64}\n"
+            "Existing leases for an older generation require rebind.\n"
             'Type "switch platform_debug" to confirm.'
         )
         assert (

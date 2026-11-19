@@ -1624,22 +1624,19 @@ def test_agent_workerbee_status_endpoint(tmp_path: Path, monkeypatch) -> None:
         "agent_pbx.workerbee.WorkerBeeStatusService.status_for_agent",
         fake_status_for_agent,
     )
-    monkeypatch.setattr(
-        "agent_pbx.workerbee_switcher.WorkerBeeSwitchService.status",
-        lambda self: {"active": {"ready": False}},  # noqa: ARG005
-    )
-    client = TestClient(create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite")))
-    client.post(
-        "/v1/agents/register",
-        json={
-            "agent_id": "agent-1",
-            "project": "demo",
-            "metadata": {"cwd": str(tmp_path)},
-        },
-    )
-
-    response = client.get("/v1/agents/agent-1/workerbee")
-    missing = client.get("/v1/agents/missing/workerbee")
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
+    with TestClient(app) as client:
+        registration = client.post(
+            "/v1/agents/register",
+            json={
+                "agent_id": "agent-1",
+                "project": "demo",
+                "metadata": {"cwd": str(tmp_path)},
+            },
+        )
+        assert registration.status_code == 200
+        response = client.get("/v1/agents/agent-1/workerbee")
+        missing = client.get("/v1/agents/missing/workerbee")
 
     assert response.status_code == 200
     assert response.json()["project"] == "demo-dev-123"
