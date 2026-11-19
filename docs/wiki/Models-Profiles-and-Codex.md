@@ -140,6 +140,12 @@ slug or effort missing from the current CLI produces a warning and is never
 silently replaced. Capability evidence is cached by executable, version,
 profile, and host, then invalidated when the Codex executable changes.
 
+The Codex row in `agent-pbx doctor` shows the host's configured model default
+and the size of the host catalog. For the effective model and reasoning effort
+of a particular running session, select that entity in the TUI and use
+`/codex model inspect`. The session can be using a role profile, an
+entity-local override, or a selection made in Codex's native `/model` picker.
+
 Existing entities keep their explicit model metadata until an operator chooses
 a managed restart, adopts a direct catalog choice, or returns the entity to its
 role default. A role-policy update does not interrupt or silently rewrite a
