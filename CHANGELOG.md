@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## v2.7.0rc1 - 2026-11-19
+
+### Added
+
+- Store WorkerBee backend selections and switch journals in a daemon-owned
+  SQLite database. Import an exact legacy selection while keeping its original
+  instance and generation.
+- Verify a cutover against the reviewed artifact, configuration, route, and
+  transport. Drain admitted work before changing the backend and require an
+  explicit session rebind after a generation change.
+- Show committed and observed WorkerBee identity separately in the TUI and
+  Doctor. Preserve local readback when admission is closed for reconciliation.
+
+### Changed
+
+- Keep the legacy adapter available for discovery and existing bindings.
+  Effectful switches require a separately qualified host adapter.
+- Clarify that the Codex Doctor model field describes the resolved launch
+  profile. Use the session status to inspect its observed model.
+
 ## v2.6.0rc3 - 2026-11-18
 
 ### Fixed
