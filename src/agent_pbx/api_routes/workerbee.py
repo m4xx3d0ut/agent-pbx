@@ -9,7 +9,6 @@ from ..auth import (
     get_store,
     require_controller,
     require_global_controller,
-    require_token,
 )
 from ..remote import principal_allows_agent
 from ..schemas import (
@@ -23,7 +22,6 @@ from ..schemas import (
     WorkerBeeControlledRunPreflightRequest,
     WorkerBeeGatewayLeaseRequest,
     WorkerBeeSnapshotPolicyRequest,
-    WorkerBeeStatusResponse,
     WorkerBeeWorkspacePolicyRequest,
     WorkerBeeWorkspacePrepareRequest,
     WorkerBeeWorkspaceTransitionDecisionRequest,
@@ -44,7 +42,10 @@ from ..workerbee_policy import WorkerBeeWorkspacePolicyError
 from ..workerbee_snapshot_policy import WorkerBeeSnapshotPolicyError
 from ..workerbee_workspace import WorkerBeeWorkspaceError
 from ._shared import require_agent
-from .workerbee_cutover import register_workerbee_switch_routes, wait_workerbee_thread, workerbee_admission
+from .workerbee_cutover import (
+    controlled_runs_readback, local_readback, register_workerbee_switch_routes, wait_workerbee_thread,
+    workerbee_admission, workerbee_agent_readback,
+)
 
 
 def register_workerbee_routes(
@@ -53,7 +54,7 @@ def register_workerbee_routes(
     workerbee_application: WorkerBeeApplicationService,
     call_workerbee_mcp_tool: Any,
 ) -> None:
-    register_workerbee_switch_routes(app)
+    register_workerbee_switch_routes(app, workerbee_application)
     admitted = workerbee_admission(workerbee_application)
 
     async def workerbee_controlled_run_preflight(
@@ -141,29 +142,6 @@ def register_workerbee_routes(
         return result
 
     @app.get(
-        "/v1/agents/{agent_id}/workerbee",
-        response_model=WorkerBeeStatusResponse,
-        dependencies=[Depends(require_token)],
-    )
-    async def get_agent_workerbee_status(
-        agent_id: str,
-        request: Request,
-        store: Any = Depends(get_store),
-    ) -> dict[str, object]:
-        agent = store.get_agent(agent_id)
-        if agent is None:
-            raise HTTPException(status_code=404, detail="agent not registered")
-        return await workerbee_application.selected_status_for_agent(agent)
-
-    @app.get(
-        "/v2/workerbee/runtime",
-        response_model=dict[str, Any],
-        dependencies=[Depends(require_token)],
-    )
-    async def workerbee_runtime_status(request: Request) -> dict[str, Any]:
-        return await wait_workerbee_thread(workerbee_application.refresh_runtime_selection)
-
-    @app.get(
         "/v2/workerbee/workspace-policy",
         response_model=dict[str, Any],
     )
@@ -189,16 +167,15 @@ def register_workerbee_routes(
         controller: ClientPrincipal = Depends(require_controller),
         store: Any = Depends(get_store),
     ) -> dict[str, Any]:
-        require_agent(store, agent_id)
+        agent = require_agent(store, agent_id)
         if not principal_allows_agent(controller, agent_id):
             raise HTTPException(
                 status_code=403, detail="controller is not scoped to this Agent"
             )
         try:
-            return await wait_workerbee_thread(
-                workerbee_application.access_readback,
-                agent_id,
-            )
+            result = await wait_workerbee_thread(workerbee_application.access_readback, agent_id)
+            result["runtime_binding"] = await wait_workerbee_thread(workerbee_agent_readback, request, agent)
+            return result
         except WorkerBeeAccessPolicyError as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
 
@@ -260,7 +237,7 @@ def register_workerbee_routes(
             )
         except WorkerBeeControlledRunError as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
-        posture["runtime"] = await wait_workerbee_thread(workerbee_application.refresh_runtime_selection)
+        posture["runtime"] = await wait_workerbee_thread(local_readback, request.app.state.workerbee_runtime)
         return posture
 
     @app.post(
@@ -328,15 +305,14 @@ def register_workerbee_routes(
         _controller: ClientPrincipal = Depends(require_global_controller),
         store: Any = Depends(get_store),
     ) -> dict[str, Any]:
-        return {
-            "requests": await wait_workerbee_thread(
-                store.list_workerbee_controlled_run_requests,
-                root_operator_agent_id=root_operator_agent_id,
-                target_fork_agent_id=target_fork_agent_id,
-                statuses=status_filter,
-                limit=limit,
-            )
-        }
+        rows = await wait_workerbee_thread(
+            store.list_workerbee_controlled_run_requests,
+            root_operator_agent_id=root_operator_agent_id,
+            target_fork_agent_id=target_fork_agent_id,
+            statuses=status_filter,
+            limit=limit, expire=False,
+        )
+        return {"requests": await wait_workerbee_thread(controlled_runs_readback, request, rows)}
 
     @app.get(
         "/v2/workerbee/controlled-runs/{request_id}",
@@ -344,6 +320,7 @@ def register_workerbee_routes(
     )
     async def get_workerbee_controlled_run(
         request_id: str,
+        request: Request,
         _controller: ClientPrincipal = Depends(require_global_controller),
         store: Any = Depends(get_store),
     ) -> dict[str, Any]:
@@ -353,7 +330,7 @@ def register_workerbee_routes(
         )
         if result is None:
             raise HTTPException(status_code=404, detail="controlled run not found")
-        return result
+        return (await wait_workerbee_thread(controlled_runs_readback, request, [result]))[0]
 
     @app.post(
         "/v2/workerbee/controlled-runs/{request_id}/decision",
@@ -654,7 +631,6 @@ def register_workerbee_routes(
             raise HTTPException(
                 status_code=403, detail="controller is not scoped to this Agent"
             )
-        await wait_workerbee_thread(workerbee_application.refresh_runtime_selection)
         runtime = request.app.state.workerbee_runtime.selected()
         return await wait_workerbee_thread(
             request.app.state.workerbee_snapshot_policy.get_policy,
@@ -726,7 +702,7 @@ def register_workerbee_routes(
         "/v2/agents/{agent_id}/workerbee/snapshot-policy/preview",
         response_model=dict[str, Any],
     )
-    @admitted("preview_agent_workerbee_snapshot_policy", discover=True)
+    @admitted("preview_agent_workerbee_snapshot_policy")
     async def preview_agent_workerbee_snapshot_policy(
         agent_id: str,
         request: Request,
@@ -738,7 +714,6 @@ def register_workerbee_routes(
             raise HTTPException(
                 status_code=403, detail="controller is not scoped to this Agent"
             )
-        await wait_workerbee_thread(workerbee_application.refresh_runtime_selection)
         runtime = request.app.state.workerbee_runtime.selected()
         if runtime is None:
             raise HTTPException(

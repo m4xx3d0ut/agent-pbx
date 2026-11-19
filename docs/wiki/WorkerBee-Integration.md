@@ -72,6 +72,27 @@ readable. Preserve the journal and the active backend evidence for review.
 Deleting selector state or restoring the legacy selection file could reuse an
 old generation and would invalidate the lease isolation guarantee.
 
+### Read selector evidence
+
+The WorkerBee view separates the committed backend, instance and generation
+from the last admitted probe. On a mismatch or a recovery hold, the daemon and
+Doctor present local selector evidence. Readback does not initialize selection,
+prepare a workspace, reconcile Agent binding metadata or issue a lease.
+An authorized workspace launch can bootstrap an unselected, ready backend
+through its existing daemon admission path.
+
+Configured targets are distinct from probed identities and qualified cutover
+previews. Scoped controllers can read their Agent's gateway and controlled-run
+generation evidence. Global controllers can review candidate details and their
+own switch transaction. A legacy binding with incomplete identity needs a
+reviewed rebind even if its generation number matches.
+
+After a client restart the journal can present the reviewed transaction and
+target. The original preview token is issued only in the preview response.
+Create a fresh preview if that token is unavailable. Rollback review uses the
+current publication's controller-owned transaction and exact selected
+generation. A held selector remains readable while its actions stay closed.
+
 ## Choose a workflow posture
 
 Agent PBX 2.3.0 keeps four runtime-authority axes independent:

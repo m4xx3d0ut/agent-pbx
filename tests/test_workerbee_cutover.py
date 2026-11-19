@@ -386,3 +386,127 @@ def test_uncertain_remote_operation_keeps_gate_closed_across_owners(tmp_path):
     assert owner.posture()["admitted"] == 1
     assert owner.selected().generation == 1
     owner.stop()
+
+
+def _readback_app(tmp_path, adapter=None):
+    app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite", token="test-admin"))
+    switcher = app.state.workerbee_switcher
+    adapter = adapter or FakeAdapter()
+    switcher.adapter = switcher.durable.adapter = adapter
+    return app, switcher.cutover, adapter
+
+
+def test_selector_readback_never_promotes_an_observation_and_stays_local_when_held(tmp_path, monkeypatch):
+    app, owner, adapter = _readback_app(tmp_path)
+    headers = {"Authorization": "Bearer test-admin"}
+    with TestClient(app, headers=headers) as client:
+        view = client.get("/v2/workerbee/runtime").json()
+        assert view["selected"] is None and owner.selected() is None
+        assert view["bootstrap_available"]
+        assert view["observed"]["backend"] == "oss"
+        assert view["observation_state"] == "probed"
+        assert "endpoint" not in view["observed"]
+        assert {row["backend"]: row["qualification_state"] for row in view["backends"]} == {
+            "oss": "probed", "platform_debug": "configured_only", "user_appliance": "configured_only",
+        }
+        owner.observe(adapter.discover(), reason="isolated admitted bootstrap")
+        adapter.active = "platform_debug"
+        view = client.get("/v2/workerbee/runtime").json()
+        assert view["selected"]["backend"] == "oss" and view["selected"]["generation"] == 1
+        assert view["observed"]["backend"] == "platform_debug"
+        assert view["observation_state"] == "mismatch"
+        assert view["admission"]["admission"] == "recovery_required"
+
+    def unexpected():
+        pytest.fail("held selector attempted backend work")
+
+    monkeypatch.setattr(adapter, "discover", unexpected)
+    app, owner, _ = _readback_app(tmp_path, adapter)
+    with TestClient(app, headers=headers) as client:
+        held = client.get("/v1/workerbee/switch").json()
+        assert held["selected"] == view["selected"] and held["observed"] == view["observed"]
+        assert held["targets"] == [] and not held["bootstrap_available"]
+        assert held["admission"]["reason"] == "external_identity_drift"
+        registered = client.post("/v1/agents/register", json={
+            "agent_id": "held-agent", "project": "synthetic",
+        })
+        assert registered.status_code == 200
+        response = client.get("/v1/agents/held-agent/workerbee")
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["status_source"] == "local_selector" and not payload["available"]
+        assert payload["selected_runtime"]["generation"] == 1
+        assert payload["selected_runtime"]["admission"]["admission"] == "recovery_required"
+
+
+def test_switch_owner_readback_restarts_without_reissuing_preview_and_pins_rollback(tmp_path):
+    app, owner, adapter = _readback_app(tmp_path)
+    headers = {"Authorization": "Bearer test-admin"}
+    with TestClient(app, headers=headers) as client:
+        owner.observe(adapter.discover(), reason="isolated seed")
+        response = client.post("/v1/workerbee/switch/preview", json={"target": "platform_debug"})
+        assert response.status_code == 200, response.text
+        preview = response.json()
+        assert preview["target_runtime"]["source_mode"] == "snapshot-import"
+        assert preview["target_runtime"]["generation"] == 2
+
+    app, owner, _ = _readback_app(tmp_path, adapter)
+    with TestClient(app, headers=headers) as client:
+        view = client.get("/v1/workerbee/switch").json()
+        assert view["last_transaction"]["transaction_id"] == preview["transaction_id"]
+        assert view["last_transaction"]["target_runtime"] == preview["target_runtime"]
+        assert "preview_token" not in view["last_transaction"] and "preview_token_sha256" not in view["last_transaction"]
+        other = client.post("/v2/remote/tokens", json={"role": "controller", "label": "other-fixture"})
+        assert other.status_code == 200, other.text
+        other_headers = {"Authorization": f"Bearer {other.json()['token']}"}
+        other_view = client.get("/v1/workerbee/switch", headers=other_headers).json()
+        assert other_view["last_transaction"] is None
+        assert view["rollback_transaction"] is None
+        response = client.post("/v1/workerbee/switch/apply", json={
+            "transaction_id": preview["transaction_id"], "preview_token": preview["preview_token"],
+            "confirm_target": preview["target"], "confirm_privileged": True,
+        })
+        assert response.status_code == 200, response.text
+        verified = response.json()
+        assert verified["after"] == preview["target_runtime"]
+
+    app, owner, _ = _readback_app(tmp_path, adapter)
+    with TestClient(app, headers=headers) as client:
+        view = client.get("/v1/workerbee/switch").json()
+        assert view["selected"] == verified["after"]
+        assert view["rollback_transaction"]["after"] == verified["after"]
+        assert view["rollback_transaction"]["source"] == preview["source"]
+        assert view["rollback_transaction"]["transaction_id"] == preview["transaction_id"]
+
+
+def test_selector_role_visibility_and_scoped_legacy_binding(tmp_path):
+    app, owner, adapter = _readback_app(tmp_path)
+    headers = {"Authorization": "Bearer test-admin"}
+    with TestClient(app, headers=headers) as client:
+        for agent in ("team-a", "team-b"):
+            registered = client.post("/v1/agents/register", json={
+                "agent_id": agent, "project": "synthetic",
+                "metadata": {"workerbee_backend": "oss", "workerbee_backend_generation": 1},
+            })
+            assert registered.status_code == 200
+        owner.observe(adapter.discover(), reason="isolated seed")
+        assert client.get("/v1/workerbee/switch").status_code == 200
+        for role in ("observer", "controller"):
+            token = client.post("/v2/remote/tokens", json={
+                "role": role, "label": f"synthetic-{role}", "allowed_agent_ids": ["team-a"],
+            })
+            assert token.status_code == 200, token.text
+            scoped = {"Authorization": f"Bearer {token.json()['token']}"}
+            assert client.get("/v1/workerbee/switch", headers=scoped).status_code == 403
+            assert client.get("/v2/workerbee/runtime", headers=scoped).status_code == 403
+            assert client.get("/v2/agents/team-b/workerbee/access-profile", headers=scoped).status_code == 403
+            own = client.get("/v2/agents/team-a/workerbee/access-profile", headers=scoped)
+            if role == "observer":
+                assert own.status_code == 403
+            else:
+                assert own.status_code == 200, own.text
+                binding = own.json()["runtime_binding"]
+                assert binding["gateway"]["state"] == "legacy_unverified"
+                assert binding["gateway"]["rebind_required"]
+                assert binding["selected"]["generation"] == 1
+                assert "backend_catalog" not in binding and "endpoint" not in binding["selected"]

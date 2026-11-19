@@ -174,7 +174,6 @@ class WorkerBeeApplicationService:
         self,
         agent: dict[str, Any],
     ) -> dict[str, Any]:
-        await wait_workerbee_thread(self.refresh_runtime_selection)
         with self._runtime_registry().admission("selected_status", require_runtime=False):
             runtime = self._runtime_registry().selected()
             return await self._selected_status(agent, runtime.public_dict() if runtime else None)
@@ -210,8 +209,7 @@ class WorkerBeeApplicationService:
         if lease_id:
             try:
                 lease, selected_binding = await wait_workerbee_thread(
-                    self._gateway().current_binding,
-                    lease_id,
+                    self._gateway().current_binding, lease_id, reconcile_metadata=False,
                 )
             except WorkerBeeGatewayError as exc:
                 lease = None

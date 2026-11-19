@@ -28,7 +28,7 @@ class WorkerBeeSwitchConfirmScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         before = self.transaction.get("before") or {}
-        target = str(self.transaction.get("target") or "-")
+        target = self.transaction.get("target_runtime") or {"backend": self.transaction.get("target")}
         expected = self.expected_confirmation()
         title = (
             "Rollback WorkerBee Backend"
@@ -40,9 +40,13 @@ class WorkerBeeSwitchConfirmScreen(ModalScreen[None]):
             yield Static(
                 "\n".join(
                     (
-                        f"Current: {before.get('backend') or '-'}",
-                        f"Target: {target}",
-                        "Existing Codex sessions remain pinned; this affects future sessions.",
+                        f"Transaction: {self.transaction.get('transaction_id') or '-'}",
+                        f"Current: {before.get('backend') or '-'} g{before.get('generation', '-')} "
+                        f"instance {before.get('instance_id', '-')}",
+                        f"Target: {target.get('backend') or '-'} g{target.get('generation', '-')} "
+                        f"instance {target.get('instance_id', '-')} · {target.get('source_mode', '-')}",
+                        f"Target fingerprint: {target.get('fingerprint', '-')}",
+                        "Existing leases for an older generation require rebind.",
                         f'Type "{expected}" to confirm.',
                     )
                 ),

@@ -367,7 +367,7 @@ def test_typed_service_container_preserves_legacy_state_and_route_owner(
         if getattr(getattr(route, "endpoint", None), "__module__", "")
         == "agent_pbx.api_routes.workerbee"
     ]
-    assert len(workerbee_routes) == 34
+    assert len(workerbee_routes) == 32
     workerbee_cutover_routes = {
         (method, route.path)
         for route in app.routes
@@ -376,6 +376,8 @@ def test_typed_service_container_preserves_legacy_state_and_route_owner(
         for method in route.methods
     }
     assert workerbee_cutover_routes == {
+        ("GET", "/v1/agents/{agent_id}/workerbee"),
+        ("GET", "/v2/workerbee/runtime"),
         ("GET", "/v1/workerbee/switch"),
         ("POST", "/v1/workerbee/switch/preview"),
         ("POST", "/v1/workerbee/switch/apply"),

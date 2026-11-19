@@ -445,6 +445,8 @@ class WorkerBeeGatewayService:
     def current_binding(
         self,
         lease_id: str,
+        *,
+        reconcile_metadata: bool = True,
     ) -> tuple[WorkerBeeGatewayLease, WorkerBeeWorkspaceBinding]:
         """Return one active internal lease/binding pair after full revalidation."""
 
@@ -459,7 +461,7 @@ class WorkerBeeGatewayService:
                 "WORKERBEE_GATEWAY_LEASE_EXPIRED",
                 "WorkerBee gateway lease expired.",
             )
-        _runtime, binding = self._refresh_context(lease)
+        _runtime, binding = self._refresh_context(lease, reconcile_metadata=reconcile_metadata)
         return lease, binding
 
     @_gated("lease_revoke")
@@ -1092,6 +1094,7 @@ class WorkerBeeGatewayService:
         lease: WorkerBeeGatewayLease,
         *,
         allow_policy_drift: bool = False,
+        reconcile_metadata: bool = True,
     ) -> tuple[WorkerBeeRuntimeSelection, WorkerBeeWorkspaceBinding]:
         runtime = self.runtime_registry.selected()
         if runtime is None:
@@ -1123,7 +1126,8 @@ class WorkerBeeGatewayService:
         self._validate_binding_scope(lease, binding)
         if not allow_policy_drift:
             self._validate_current_path_policy(lease, binding)
-        self._notify_binding_validated(lease, binding)
+        if reconcile_metadata:
+            self._notify_binding_validated(lease, binding)
         return runtime, binding
 
     def _validate_current_path_policy(

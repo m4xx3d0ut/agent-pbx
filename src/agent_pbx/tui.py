@@ -212,6 +212,7 @@ from .ui.controllers import (
     OperatorHandoffController,
     PromptReferenceController,
     WorkerBeeController,
+    WorkerBeeLaunchPreflightError as WorkerBeeLaunchPreflightError,
     WorkerBeeLifecycleController,
     WorkerBeeProjectionController,
     controller_method,
@@ -1003,66 +1004,6 @@ class ManagedTmuxLifecycleTarget:
 
 class CodexSessionLeaseConflictError(RuntimeError):
     """A resumed Codex session is still leased by another client."""
-
-
-class WorkerBeeLaunchPreflightError(RuntimeError):
-    """WorkerBee rejected launch preparation before Codex was changed."""
-
-    def __init__(
-        self,
-        *,
-        agent_id: str,
-        phase: str,
-        code: str,
-        message: str,
-        remediation: str = "",
-        status_code: int | None = None,
-    ) -> None:
-        self.agent_id = agent_id
-        self.phase = phase
-        self.code = code
-        self.message = message
-        self.remediation = remediation
-        self.status_code = status_code
-        detail = f"{code}: {message}" if code else message
-        if remediation:
-            detail = f"{detail} Remediation: {remediation}"
-        super().__init__(
-            f"WorkerBee {phase} preflight failed for {agent_id}: {detail} "
-            "No Codex process was started or replaced."
-        )
-
-    @classmethod
-    def from_response(
-        cls,
-        response: httpx.Response,
-        *,
-        agent_id: str,
-        phase: str,
-    ) -> WorkerBeeLaunchPreflightError:
-        status_code = int(response.status_code)
-        code = f"WORKERBEE_HTTP_{status_code}"
-        message = f"WorkerBee returned HTTP {status_code}."
-        remediation = ""
-        try:
-            payload = response.json()
-        except (TypeError, ValueError):
-            payload = None
-        detail = payload.get("detail") if isinstance(payload, dict) else None
-        if isinstance(detail, dict):
-            code = str(detail.get("code") or code).strip() or code
-            message = str(detail.get("message") or message).strip() or message
-            remediation = str(detail.get("remediation") or "").strip()
-        elif isinstance(detail, str) and detail.strip():
-            message = detail.strip()
-        return cls(
-            agent_id=agent_id,
-            phase=phase,
-            code=code,
-            message=message,
-            remediation=remediation,
-            status_code=status_code,
-        )
 
 
 @dataclass(frozen=True)
@@ -21516,94 +21457,9 @@ class AgentPBXTUI(App[None]):
         metadata[WORKERBEE_WORKSPACE_POLICY_DIGEST_METADATA_KEY] = digest
         return selected, metadata
 
-    async def prepare_workerbee_gateway_launch(
-        self,
-        *,
-        agent_id: str,
-        project: str,
-        codex_session_id: str,
-        profile: str,
-        source_root: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Prepare one exact backend workspace and a one-time launch lease."""
-
-        try:
-            runtime_response = await self.api_client().get(
-                "/v2/workerbee/runtime",
-                headers=auth_headers(self.token),
-                timeout=30,
-            )
-            if runtime_response.status_code == 404:
-                return None
-            if runtime_response.status_code >= 400:
-                raise WorkerBeeLaunchPreflightError.from_response(
-                    runtime_response,
-                    agent_id=agent_id,
-                    phase="runtime discovery",
-                )
-            runtime_response.raise_for_status()
-            runtime_posture = runtime_response.json()
-            if not isinstance(runtime_posture, dict) or not isinstance(
-                runtime_posture.get("selected"), dict
-            ):
-                return None
-            workspace_payload: dict[str, object] = {
-                "project": project,
-                "source_root": source_root,
-            }
-            workspace_response = await self.api_client().post(
-                f"/v2/agents/{quote(agent_id, safe='')}/workerbee/workspaces",
-                json=workspace_payload,
-                headers=auth_headers(self.token),
-                timeout=330,
-            )
-            if workspace_response.status_code == 404:
-                return None
-            if workspace_response.status_code >= 400:
-                raise WorkerBeeLaunchPreflightError.from_response(
-                    workspace_response,
-                    agent_id=agent_id,
-                    phase="workspace staging",
-                )
-            workspace_response.raise_for_status()
-            workspace = workspace_response.json()
-            lease_response = await self.api_client().post(
-                f"/v2/agents/{quote(agent_id, safe='')}/workerbee/leases",
-                json={
-                    "codex_session_id": codex_session_id,
-                    "profile": profile,
-                    "workspace_binding_id": workspace.get("binding_id"),
-                },
-                headers=auth_headers(self.token),
-                timeout=30,
-            )
-            if lease_response.status_code >= 400:
-                raise WorkerBeeLaunchPreflightError.from_response(
-                    lease_response,
-                    agent_id=agent_id,
-                    phase="gateway lease",
-                )
-            lease_response.raise_for_status()
-            binding = lease_response.json()
-        except WorkerBeeLaunchPreflightError:
-            raise
-        except Exception as exc:
-            raise RuntimeError(
-                f"WorkerBee launch preflight failed for {agent_id}: {exc}. "
-                "No Codex process was started or replaced."
-            ) from exc
-        if not isinstance(binding, dict) or not isinstance(workspace, dict):
-            raise RuntimeError("WorkerBee runtime binding returned invalid data")
-        lease = binding.get("lease") if isinstance(binding.get("lease"), dict) else {}
-        if not (
-            str(workspace.get("binding_id") or "").strip()
-            and str(binding.get("gateway_url") or "").strip()
-            and str(binding.get("token") or "").strip()
-            and str(lease.get("lease_id") or "").strip()
-        ):
-            raise RuntimeError("WorkerBee runtime binding response is incomplete")
-        binding["workspace_binding"] = workspace
-        return binding
+    prepare_workerbee_gateway_launch = controller_method(
+        "_workerbee_controller", "prepare_workerbee_gateway_launch",
+    )
 
     async def prepare_operator_fork_workerbee_launch(
         self,

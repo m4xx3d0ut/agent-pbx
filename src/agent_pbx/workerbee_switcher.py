@@ -151,7 +151,9 @@ class WorkerBeeSwitchService:
                 "generation_guard_required": True,
             }
         with self.cutover.operation("selector_discovery", require_runtime=False):
-            return self._status(self.adapter.discover())
+            observed = self.adapter.discover()
+            self.cutover.record_observation(observed)
+            return self._status(observed)
 
     def _status(self, active: dict[str, Any]) -> dict[str, Any]:
         descriptors = self._descriptors()

@@ -47,6 +47,7 @@ from .references import PromptReferenceController
 from .workerbee import WorkerBeeController
 from .workerbee_lifecycle import WorkerBeeLifecycleController
 from .workerbee_projection import WorkerBeeProjectionController
+from .workerbee_selector import WorkerBeeLaunchPreflightError
 
 
 __all__ = [
@@ -93,6 +94,7 @@ __all__ = [
     "WorkerBeeController",
     "WorkerBeeLifecycleController",
     "WorkerBeeProjectionController",
+    "WorkerBeeLaunchPreflightError",
     "controller_method",
     "github_ref_number",
 ]

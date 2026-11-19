@@ -1892,6 +1892,7 @@ def test_gateway_api_manages_backend_aware_snapshot_policy(tmp_path: Path) -> No
 
     app.state.workerbee_switcher = Selector()
     with TestClient(app) as client:
+        app.state.workerbee_runtime.observe(Selector().status()["active"])
         assert client.post(
             "/v1/agents/register",
             json={
@@ -2146,6 +2147,7 @@ def test_selected_appliance_status_requires_binding_without_host_cli_fallback(
     app.state.workerbee_switcher = Selector()
     app.state.workerbee = HostCliMustNotRun()
     with TestClient(app) as client:
+        app.state.workerbee_runtime.observe(Selector().status()["active"])
         assert client.post(
             "/v1/agents/register",
             json={
@@ -2213,10 +2215,17 @@ def test_selected_appliance_status_uses_bound_selected_mcp(
                 status = "active"
                 revoked_at = None
                 workspace_binding_id = "wb-binding-refreshed"
+                backend = selection.backend
+                backend_generation = selection.generation
+                backend_instance_id = selection.instance_id
+                backend_fingerprint = selection.fingerprint
+                expires_at = None
+                source_mode = "snapshot-import"
 
             return Lease()
 
-        def current_binding(self, lease_id):  # type: ignore[no-untyped-def]
+        def current_binding(self, lease_id, *, reconcile_metadata):  # type: ignore[no-untyped-def]
+            assert reconcile_metadata is False
             return self.load(lease_id), Binding()
 
     class HostCliMustNotRun:
@@ -2242,6 +2251,7 @@ def test_selected_appliance_status_uses_bound_selected_mcp(
     app.state.workerbee_gateway = Gateway()
     app.state.workerbee = HostCliMustNotRun()
     with TestClient(app) as client:
+        selection = app.state.workerbee_runtime.observe(Selector().status()["active"])
         assert client.post(
             "/v1/agents/register",
             json={
@@ -2260,6 +2270,7 @@ def test_selected_appliance_status_uses_bound_selected_mcp(
         payload = response.json()
         assert payload["available"] is True
         assert payload["status_source"] == "selected_mcp"
+        assert payload["selected_runtime"]["gateway"]["projection_stale"] is True
         assert payload["workspace_binding"]["runtime_workspace_path"] == (
             "/workspace/imports/wb-binding-refreshed"
         )

@@ -19,17 +19,16 @@ from ..screens import (
     WorkerBeeControlledRunLeaseScreen,
     WorkerBeeControlledRunScreen,
     WorkerBeeSnapshotScreen,
-    WorkerBeeSwitchConfirmScreen,
     WorkerBeeWorkspaceScreen,
 )
 from ..workerbee_config import (
     CALLER_WORKERBEE_PROFILE_METADATA_KEY,
     REVIEW_OPERATOR_WORKERBEE_APPROVED_TOOLS,
 )
-from ._base import TUIController
+from .workerbee_selector import WorkerBeeSelectorController
 
 
-class WorkerBeeController(TUIController[Any]):
+class WorkerBeeController(WorkerBeeSelectorController):
     async def fetch_workerbee_controlled_runs(
         self,
         operator_agent_id: str,
@@ -226,7 +225,10 @@ class WorkerBeeController(TUIController[Any]):
                 f"{item.get('status', '-'):>12}  {str(item.get('request_id') or '')[:12]}  "
                 f"{str(item.get('baseline_commit') or '')[:8]}→"
                 f"{str(item.get('candidate_commit') or '')[:8]}  "
-                f"{item.get('profile_id') or '-'}"
+                f"{item.get('profile_id') or '-'}  "
+                f"{(item.get('runtime_binding') or {}).get('state', 'legacy_unverified')} "
+                f"g{((item.get('runtime_binding') or {}).get('bound') or {}).get('generation', '-')}→"
+                f"g{((item.get('runtime_binding') or {}).get('selected') or {}).get('generation', '-')}"
                 for item in requests
             )
             if not requests:
@@ -867,141 +869,10 @@ class WorkerBeeController(TUIController[Any]):
         screen.dismiss()
         await self.load_workerbee_status(screen.agent_id)
 
-    async def preview_workerbee_switch(self, target: str) -> None:
-        try:
-            response = await self.api_client().post(
-                "/v1/workerbee/switch/preview",
-                json={"target": target},
-                headers=auth_headers(self.token),
-                timeout=60,
-            )
-            response.raise_for_status()
-            transaction = response.json()
-        except Exception as exc:
-            self.notify(f"WorkerBee switch preview failed: {exc}", severity="error")
-            return
-        self.workerbee_switch_transaction = dict(transaction)
-        self.push_screen(WorkerBeeSwitchConfirmScreen(transaction=transaction))
-
-    async def apply_workerbee_switch(
-        self,
-        transaction: dict[str, Any],
-        *,
-        confirmation: str,
-    ) -> None:
-        target = str(transaction.get("target") or "")
-        if confirmation.strip() != f"switch {target}":
-            self.notify(
-                "WorkerBee switch confirmation did not match.", severity="warning"
-            )
-            return
-        try:
-            response = await self.api_client().post(
-                "/v1/workerbee/switch/apply",
-                json={
-                    "transaction_id": transaction.get("transaction_id"),
-                    "preview_token": transaction.get("preview_token"),
-                    "confirm_target": target,
-                    "confirm_privileged": target == "platform_debug",
-                },
-                headers=auth_headers(self.token),
-                timeout=240,
-            )
-            response.raise_for_status()
-            result = response.json()
-        except Exception as exc:
-            self.notify(f"WorkerBee switch failed: {exc}", severity="error")
-            return
-        self.workerbee_switch_transaction = dict(result)
-        self.workerbee_status_by_agent.clear()
-        self.workerbee_project_visibility = None
-        phase = str(result.get("phase") or "unknown")
-        severity = "information" if phase in {"verified", "verified_noop"} else "error"
-        self.notify(f"WorkerBee switch result: {phase}.", severity=severity)
-        await self.refresh_workerbee_mcp_preflight()
-        if self.selected_agent_id:
-            await self.load_workerbee_status(self.selected_agent_id)
-
-    async def preview_workerbee_switch_rollback(self) -> None:
-        transaction = self.workerbee_switch_transaction
-        status: dict[str, Any] = {}
-        if not transaction or transaction.get("phase") not in {
-            "verified",
-            "verified_noop",
-        }:
-            try:
-                response = await self.api_client().get(
-                    "/v1/workerbee/switch",
-                    headers=auth_headers(self.token),
-                    timeout=15,
-                )
-                response.raise_for_status()
-                status = response.json()
-            except Exception as exc:
-                self.notify(
-                    f"WorkerBee rollback status failed: {exc}", severity="error"
-                )
-                return
-            transaction = status.get("last_transaction")
-        if not isinstance(transaction, dict) or transaction.get("phase") not in {
-            "verified",
-            "verified_noop",
-        }:
-            self.notify(
-                "No verified WorkerBee switch is available to roll back.",
-                severity="warning",
-            )
-            return
-        display = dict(transaction)
-        active = status.get("active") if isinstance(status.get("active"), dict) else {}
-        display.setdefault("before", active)
-        display["target"] = str(
-            display.get("rollback_backend")
-            or display.get("before_backend")
-            or (display.get("before") or {}).get("backend")
-            or "prior backend"
-        )
-        self.push_screen(
-            WorkerBeeSwitchConfirmScreen(transaction=display, action="rollback")
-        )
-
-    async def rollback_workerbee_switch(
-        self,
-        transaction: dict[str, Any],
-        *,
-        confirmation: str,
-    ) -> None:
-        transaction_id = str(transaction.get("transaction_id") or "")
-        if confirmation.strip() != f"rollback {transaction_id}":
-            self.notify(
-                "WorkerBee rollback confirmation did not match.", severity="warning"
-            )
-            return
-        try:
-            response = await self.api_client().post(
-                "/v1/workerbee/switch/rollback",
-                json={"transaction_id": transaction_id, "confirm": True},
-                headers=auth_headers(self.token),
-                timeout=240,
-            )
-            response.raise_for_status()
-            result = response.json()
-        except Exception as exc:
-            self.notify(f"WorkerBee rollback failed: {exc}", severity="error")
-            return
-        self.workerbee_switch_transaction = dict(result)
-        self.workerbee_status_by_agent.clear()
-        self.workerbee_project_visibility = None
-        phase = str(result.get("phase") or "unknown")
-        self.notify(
-            f"WorkerBee rollback result: {phase}.",
-            severity="information" if phase == "rolled_back" else "error",
-        )
-        await self.refresh_workerbee_mcp_preflight()
-        if self.selected_agent_id:
-            await self.load_workerbee_status(self.selected_agent_id)
-
     async def refresh_workerbee_mcp_preflight(self) -> WorkerBeeMcpPreflight:
+        governed = await self._governed_workerbee_preflight()
+        if governed is not None:
+            return governed
         endpoint = self.workerbee_mcp_endpoint()
         prior_provenance = self.workerbee_backend_provenance
         provenance = await asyncio.to_thread(

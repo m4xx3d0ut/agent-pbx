@@ -87,6 +87,54 @@ def read_durable_selection(path: Path) -> WorkerBeeRuntimeSelection | None:
     return _selection(row[0])
 
 
+def read_durable_readback(path: Path, *, controller: str | None = None) -> dict[str, Any]:
+    """Read one selector snapshot without taking ownership or contacting a backend."""
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        db.execute("BEGIN")
+        row = WorkerBeeCutover._control(db)
+        selected = _selection(row["selected"])
+        observation = None
+        # CP2 databases have no observation table until the next owner startup.
+        if db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='selector_observation'"
+        ).fetchone():
+            evidence = db.execute("SELECT record FROM selector_observation WHERE singleton=1").fetchone()
+            observation = json.loads(evidence["record"]) if evidence else None
+        active = None
+        if row["transaction_id"]:
+            active = WorkerBeeCutover._journal(db, row["transaction_id"])
+        own_latest = rollback = None
+        if controller is not None:
+            own_latest = db.execute(
+                "SELECT * FROM switch_journal WHERE controller=? ORDER BY rowid DESC LIMIT 1",
+                (controller,),
+            ).fetchone()
+            if row["publication"]:
+                marker = json.loads(row["publication"])
+                found = WorkerBeeCutover._journal(db, marker["transaction_id"])
+                if found["controller"] == controller and found["phase"] == "verified":
+                    after = json.loads(found["record"]).get("after")
+                    if selected and selected.public_dict() == after and marker["generation"] == selected.generation:
+                        rollback = found
+        return {
+            "selected": selected.public_dict() if selected else None,
+            "observation": observation,
+            "admission": {
+                "admission": row["gate"],
+                "reason": row["reason"],
+                "admitted": db.execute("SELECT COUNT(*) FROM admitted").fetchone()[0],
+                "phase": active["phase"] if active else None,
+                "transaction_id": active["transaction_id"]
+                if active is not None and controller == active["controller"] else None,
+            },
+            "latest": {**json.loads(own_latest["record"]), "phase": own_latest["phase"]}
+            if own_latest else None,
+            "rollback": {**json.loads(rollback["record"]), "phase": rollback["phase"]}
+            if rollback else None,
+        }
+
+
 @dataclass(slots=True)
 class WorkerBeeOperation:
     operation_id: str
@@ -190,6 +238,10 @@ class WorkerBeeCutover:
                         )
                     if version == 0:
                         self._initialize(db)
+                    db.execute(
+                        "CREATE TABLE IF NOT EXISTS selector_observation "
+                        "(singleton INTEGER PRIMARY KEY CHECK (singleton=1), record TEXT NOT NULL)"
+                    )
                     row = self._control(db)
                     _selection(row["selected"])
                     self._epoch = row["epoch"] + 1
@@ -402,6 +454,42 @@ class WorkerBeeCutover:
                 "WORKERBEE_BACKEND_DRIFT", "Observed backend differs from committed selection"
             )
         return observed
+
+    def record_observation(self, provenance: Mapping[str, Any]) -> None:
+        """Capture evidence and fence observed drift without publishing a selection."""
+        operation = self._operation.get()
+        if operation is None or operation.closed:
+            raise WorkerBeeCutoverError("WORKERBEE_CUTOVER_FENCED", "Observation has no admission")
+        observation: dict[str, Any] = {"state": "unavailable", "checked_at": time.time()}
+        observed = None
+        if provenance.get("ready") is True:
+            try:
+                observed = make_runtime_selection(provenance, reason="observation")
+            except ValueError:
+                observation["state"] = "invalid"
+            else:
+                observation.update(
+                    state="probed", backend=observed.backend, fingerprint=observed.fingerprint,
+                    instance_id=observed.instance_id, workspace_strategy=observed.workspace_strategy,
+                )
+        with self._gate_write() as db:
+            state = self._control(db)
+            current = _selection(state["selected"])
+            if state["gate"] != "open" or current != operation.runtime:
+                return
+            observation["against_generation"] = current.generation if current else None
+            db.execute(
+                "INSERT INTO selector_observation VALUES(1, ?) "
+                "ON CONFLICT(singleton) DO UPDATE SET record=excluded.record",
+                (_json(observation),),
+            )
+            if current and (
+                observation["state"] == "invalid" or (observed and current.fingerprint != observed.fingerprint)
+            ):
+                db.execute(
+                    "UPDATE control SET gate='recovery_required', reason='external_identity_drift' "
+                    "WHERE singleton=1"
+                )
 
     @contextmanager
     def operation(

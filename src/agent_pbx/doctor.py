@@ -30,6 +30,7 @@ from .tmux_binary import (
 from .runtime_tmux import RUNTIME_TMUX_SOCKET_ENV, tmux_socket_from_environment
 from .ui.theme import terminal_color_depth
 from .workerbee_mcp import inspect_workerbee_mcp, inspect_workerbee_switcher
+from .workerbee_readback import local_readback
 from .workerbee_runtime import (
     WORKERBEE_BACKEND_PLATFORM_DEBUG,
     WORKERBEE_BACKEND_USER_APPLIANCE,
@@ -160,7 +161,7 @@ def run_platform_doctor(
     checks.append(_codex_check(codex_command, timeout))
     checks.append(_codex_theme_check())
     checks.append(_workerbee_check(config, which, timeout))
-    checks.append(_workerbee_switcher_check(which, timeout))
+    checks.append(_workerbee_switcher_check(which, timeout, config=config))
     checks.append(_workerbee_runtime_binding_check(config, which, timeout))
     checks.append(_workerbee_tool_surface_runtime_check(config, timeout))
     checks.append(_workerbee_workspace_policy_check(config))
@@ -702,7 +703,15 @@ def _workerbee_check(
 def _workerbee_switcher_check(
     which: Callable[[str], str | None],
     timeout: float,
+    *, config: MCPDaemonConfig | None = None,
 ) -> DoctorCheck:
+    if config is not None:
+        registry = WorkerBeeRuntimeRegistry(config.resolved_db_path.parent / "workerbee-runtime")
+        if registry.has_durable_selection:
+            return DoctorCheck(
+                "workerbee-mcp-switcher", "pass",
+                "daemon-managed selector; Doctor uses local evidence",
+            )
     provenance = inspect_workerbee_switcher(
         timeout_seconds=timeout,
         which=which,
@@ -744,6 +753,25 @@ def _workerbee_runtime_binding_check(
     timeout: float,
 ) -> DoctorCheck:
     """Report the selected backend generation and appliance materializer posture."""
+
+    registry = WorkerBeeRuntimeRegistry(config.resolved_db_path.parent / "workerbee-runtime")
+    if registry.has_durable_selection:
+        view = local_readback(registry)
+        gate = view["admission"]
+        selected = view["selected"] or {}
+        observed = view["observed"] or {}
+        ok = gate["admission"] == "open" and view["observation_state"] == "matches_selected"
+        return DoctorCheck(
+            "workerbee-runtime-binding", "pass" if ok else "warn",
+            f"WorkerBee selector {gate['admission']} · {view['observation_state']}",
+            detail=(
+                f"selected={selected.get('backend', '-')} g{selected.get('generation', '-')} "
+                f"instance={selected.get('instance_id', '-')} source={selected.get('source_mode', '-')} · "
+                f"observed={observed.get('backend', '-')} instance={observed.get('instance_id', '-')} · "
+                f"reason={gate.get('reason') or '-'}"
+            ),
+            remediation="" if ok else "Review the daemon selector gate and exact generation before rebinding.",
+        )
 
     provenance = inspect_workerbee_switcher(
         timeout_seconds=timeout,

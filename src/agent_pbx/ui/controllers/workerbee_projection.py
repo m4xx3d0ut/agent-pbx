@@ -90,14 +90,29 @@ class WorkerBeeProjectionController(TUIController[Any]):
             else None
         )
         if selected_runtime:
-            lines.extend(
-                [
-                    f"Selected backend: {selected_runtime.get('backend') or '-'}",
-                    f"Backend generation: {selected_runtime.get('generation') or '-'}",
-                    f"Backend server: {selected_runtime.get('server_name') or '-'} "
-                    f"{selected_runtime.get('server_version') or ''}".rstrip(),
-                ]
-            )
+            observed = selected_runtime.get("observed") or {}
+            gate = selected_runtime.get("admission") or {}
+            lease = selected_runtime.get("gateway") or {}
+            bound = lease.get("bound") or {}
+            lines.extend([
+                f"Selected backend: {selected_runtime.get('backend') or '-'}",
+                f"Backend generation: {selected_runtime.get('generation') or '-'}",
+                f"Selected instance: {selected_runtime.get('instance_id') or '-'}",
+                f"Selected source mode: {selected_runtime.get('source_mode') or '-'}",
+            ])
+            if gate:
+                lines.extend([
+                    f"Selector admission: {gate.get('admission', '-')} {gate.get('reason', '')}".rstrip(),
+                    f"Observed backend: {observed.get('backend', '-')} instance {observed.get('instance_id', '-')} "
+                    f"({selected_runtime.get('observation_state', 'not_probed')})",
+                    f"Gateway binding: {lease.get('state', '-')} · "
+                    f"{bound.get('backend', '-')} g{bound.get('generation', '-')} "
+                    f"instance {bound.get('instance_id', '-')} · {lease.get('source_mode') or '-'}",
+                ])
+                if lease.get("rebind_required"):
+                    lines.append("Review the observed identity and rebind through an approved launch.")
+                elif lease.get("projection_stale"):
+                    lines.append("Agent metadata is behind the recorded gateway lease.")
         workspace_binding = (
             status.get("workspace_binding")
             if isinstance(status.get("workspace_binding"), dict)
