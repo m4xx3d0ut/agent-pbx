@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .controller_metadata import (
     merge_controller_metadata,
@@ -1206,18 +1206,9 @@ class Store:
     def delete_tmux_runtime_mapping(self, entity_id: str) -> bool:
         return self._runtime.delete_mapping(entity_id)
 
-    @staticmethod
-    def _managed_runtime_stop_identity(mapping: Mapping[str, Any]) -> dict[str, Any]:
-        return {
-            "server_id": str(mapping.get("server_id") or ""),
-            "socket_path": str(mapping.get("socket_path") or ""),
-            "session_name": str(mapping.get("session_name") or ""),
-            "window_id": str(mapping.get("window_id") or ""),
-            "pane_id": str(mapping.get("pane_id") or ""),
-            "pane_pid": mapping.get("pane_pid"),
-            "process_start_ticks": mapping.get("process_start_ticks"),
-            "codex_session_id": mapping.get("codex_session_id"),
-        }
+    _managed_runtime_stop_identity = staticmethod(RuntimeRepository.managed_stop_identity)
+    _tmux_runtime_mapping_from_row = staticmethod(RuntimeRepository.mapping_from_row)
+    _runtime_migration_batch_from_row = staticmethod(RuntimeRepository.migration_batch_from_row)
 
     def prepare_managed_runtime_stop(
         self,
@@ -11773,16 +11764,8 @@ class Store:
         return ModelElevationRepository.from_row(row)
 
     @staticmethod
-    def _tmux_runtime_mapping_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        return RuntimeRepository.mapping_from_row(row)
-
-    @staticmethod
     def _terminal_editor_runtime_from_row(row: sqlite3.Row) -> dict[str, Any]:
         return TerminalEditorRepository.from_row(row)
-
-    @staticmethod
-    def _runtime_migration_batch_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        return RuntimeRepository.migration_batch_from_row(row)
 
     @staticmethod
     def _thread_report(report: dict[str, Any]) -> dict[str, Any]:

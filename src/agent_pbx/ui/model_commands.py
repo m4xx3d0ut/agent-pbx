@@ -45,6 +45,15 @@ MODEL_COMMANDS = (
 )
 
 
+def iter_restart_commands(app: Any, catalog: Any) -> Iterator[SystemCommand]:
+    yield catalog.command(
+        "/restart",
+        "Restart the selected tmux Codex pane using its persisted model",
+        app.palette_tmux_restart,
+    )
+    yield catalog.command("/codex restart", "Restart the selected tmux Codex pane", app.palette_tmux_restart)
+
+
 def iter_model_commands(app: Any, catalog: Any) -> Iterator[SystemCommand]:
     for command in MODEL_COMMANDS:
         callback = getattr(app, command.callback_name)

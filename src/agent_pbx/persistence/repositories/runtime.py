@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from typing import Any
+from typing import Any, Mapping
 
 from ...security import now_ts
 from ..connection import SQLiteConnectionFactory
@@ -15,6 +15,19 @@ class RuntimeRepository:
 
     def __init__(self, connections: SQLiteConnectionFactory) -> None:
         self._connections = connections
+
+    @staticmethod
+    def managed_stop_identity(mapping: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "server_id": str(mapping.get("server_id") or ""),
+            "socket_path": str(mapping.get("socket_path") or ""),
+            "session_name": str(mapping.get("session_name") or ""),
+            "window_id": str(mapping.get("window_id") or ""),
+            "pane_id": str(mapping.get("pane_id") or ""),
+            "pane_pid": mapping.get("pane_pid"),
+            "process_start_ticks": mapping.get("process_start_ticks"),
+            "codex_session_id": mapping.get("codex_session_id"),
+        }
 
     def upsert_mapping(
         self,

@@ -60,12 +60,12 @@
       "lines": 559
     },
     "src/agent_pbx/ui/command_catalog.py": {
-      "ast_nodes": 3464,
-      "bytes": 36006,
+      "ast_nodes": 3449,
+      "bytes": 35858,
       "classes": 3,
       "functions": 6,
       "imports": 7,
-      "lines": 723
+      "lines": 722
     },
     "src/agent_pbx/ui/controllers/github.py": {
       "ast_nodes": 6966,
@@ -560,6 +560,12 @@
       {
         "async": false,
         "decorators": [],
+        "name": "bind_managed_tmux_codex_session",
+        "signature": "self, entity_id: str, *, codex_session_id: str, expected_pane_id: str, expected_bootstrap_id: str"
+      },
+      {
+        "async": false,
+        "decorators": [],
         "name": "list_tmux_runtime_mappings",
         "signature": "self"
       },
@@ -586,14 +592,6 @@
         "decorators": [],
         "name": "delete_tmux_runtime_mapping",
         "signature": "self, entity_id: str"
-      },
-      {
-        "async": false,
-        "decorators": [
-          "staticmethod"
-        ],
-        "name": "_managed_runtime_stop_identity",
-        "signature": "mapping: Mapping[str, Any]"
       },
       {
         "async": false,
@@ -2688,23 +2686,7 @@
         "decorators": [
           "staticmethod"
         ],
-        "name": "_tmux_runtime_mapping_from_row",
-        "signature": "row: sqlite3.Row"
-      },
-      {
-        "async": false,
-        "decorators": [
-          "staticmethod"
-        ],
         "name": "_terminal_editor_runtime_from_row",
-        "signature": "row: sqlite3.Row"
-      },
-      {
-        "async": false,
-        "decorators": [
-          "staticmethod"
-        ],
-        "name": "_runtime_migration_batch_from_row",
         "signature": "row: sqlite3.Row"
       },
       {

@@ -188,7 +188,7 @@ def test_store_schema_and_transaction_inventory_are_versioned() -> None:
     assert contract["store_contract"] == _checker().collect_store_contract()
     assert contract["store_contract"]["schema_version"] == 46
     assert len(contract["store_contract"]["begin_immediate_methods"]) == 35
-    assert len(contract["store_contract"]["method_declarations"]) == 370
+    assert len(contract["store_contract"]["method_declarations"]) == 368
     assert contract["store_contract"]["connection"] == {
         "foreign_keys": 1,
         "in_transaction_on_open": False,
