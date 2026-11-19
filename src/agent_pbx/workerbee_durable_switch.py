@@ -144,7 +144,7 @@ class WorkerBeeDurableSwitch:
                 "plan_summary": ["Verified artifact, route, runtime, and workspace compatibility required"],
                 "preview_token_sha256": _digest(token), "created_at": now,
                 "expires_at": now + self.preview_ttl,
-                "requires_privileged_confirmation": target == "platform_debug",
+                "requires_privileged_confirmation": target in {"platform_debug", "user_appliance"},
                 "existing_sessions_pinned": False, "future_sessions_only": True,
                 "generation_guard_required": True, "impact": impact,
             }

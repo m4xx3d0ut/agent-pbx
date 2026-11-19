@@ -93,6 +93,31 @@ Create a fresh preview if that token is unavailable. Rollback review uses the
 current publication's controller-owned transaction and exact selected
 generation. A held selector remains readable while its actions stay closed.
 
+### Provider-free qualification
+
+The selector integration test drives all six ordered transitions among OSS,
+platform-debug, and a synthetic user appliance through the Agent PBX daemon's
+controller API and mounted MCP gateway. It uses distinct in-process route and
+transport identities, disposable SQLite state, and synthetic workspace
+materializers. OSS uses a temporary checkout directly. The platform-debug
+fixture returns a snapshot receipt through the normal materializer parser. The
+managed-clone and console receipts exercise a synthetic appliance contract.
+The harness denies network access and never starts a backend image.
+
+Preview and apply accept the host-qualified `user_appliance` extension only
+through global controller authorization, an exact preview, explicit privileged
+confirmation, and the durable adapter's qualification and verification.
+The published target enum remains OSS and platform-debug. The shipped legacy
+adapter cannot perform effectful durable cutover. The standard user appliance,
+its real managed volumes, and its console require separate qualification.
+
+Qualification includes rollback generation changes, obsolete lease rejection,
+scope filtering, route or transport drift, competing controllers, admitted
+gateway and controlled-run work draining, and interrupted recovery. Application
+tests prove local readback while the gate is closed and reopening after exact
+verification. Production backend, appliance image, external route, and provider
+compatibility require separate evidence.
+
 ## Choose a workflow posture
 
 Agent PBX 2.3.0 keeps four runtime-authority axes independent:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+from pydantic.json_schema import SkipJsonSchema
 
 
 AgentType = Literal["caller", "operator"]
@@ -2323,8 +2324,14 @@ class TerminalEditorStartRequest(BaseModel):
     line: int | None = Field(default=None, ge=1, le=10_000_000)
 
 
+# The host-qualified appliance is a controller extension. The public selector
+# still advertises only the shipped adapters, and the coordinator qualifies
+# both adapters before it can record a preview.
+WorkerBeeSwitchTarget = Literal["oss", "platform_debug"] | SkipJsonSchema[Literal["user_appliance"]]
+
+
 class WorkerBeeSwitchPreviewRequest(BaseModel):
-    target: Literal["oss", "platform_debug"]
+    target: WorkerBeeSwitchTarget
 
 
 class EvidenceExportRequest(BaseModel):
@@ -2364,7 +2371,7 @@ class EvidenceRetentionPreviewRequest(BaseModel):
 class WorkerBeeSwitchApplyRequest(BaseModel):
     transaction_id: str = Field(min_length=24, max_length=24)
     preview_token: str = Field(min_length=16, max_length=256)
-    confirm_target: Literal["oss", "platform_debug"]
+    confirm_target: WorkerBeeSwitchTarget
     confirm_privileged: bool = False
 
 
