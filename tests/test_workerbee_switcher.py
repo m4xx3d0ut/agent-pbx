@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
+from agent_pbx.workerbee_backend_adapter import WorkerBeeSwitchBackend
+from agent_pbx.workerbee_runtime import WorkerBeeRuntimeRegistry
 from agent_pbx.workerbee_switcher import WorkerBeeSwitchService
 
 
@@ -53,6 +55,7 @@ class FakeSwitcher:
         self.posture = posture
         self.configured_posture = configured_posture
         self.fail_posture_mismatch = fail_posture_mismatch
+        self.fail_apply = False
         self.commands: list[list[str]] = []
 
     def __call__(self, command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -85,6 +88,8 @@ class FakeSwitcher:
                 f"[dry-run] would switch {self.backend} to {target}\n",
                 "",
             )
+        if self.fail_apply:
+            return subprocess.CompletedProcess(command, 1, "", "apply refused")
         self.backend = target
         if target == "platform_debug":
             self.posture = target_posture
@@ -145,6 +150,9 @@ def test_workerbee_switch_preview_apply_and_rollback(tmp_path: Path) -> None:
     assert preview["before"]["backend"] == "oss"
     assert preview["requires_privileged_confirmation"] is True
     assert preview["plan_summary"] == ["[dry-run] would switch oss to platform_debug"]
+    assert switcher.commands[-1] == [
+        "switch-test", "switch-debug", "--dry-run", "--json", "--confirm-platform-debug"
+    ]
     assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
     assert switcher.backend == "oss"
 
@@ -160,6 +168,7 @@ def test_workerbee_switch_preview_apply_and_rollback(tmp_path: Path) -> None:
     assert applied["capability"]["ready"] is True
     assert "preview_token" not in applied
     assert switcher.backend == "platform_debug"
+    assert ["switch-test", "switch-debug", "--json", "--confirm-platform-debug"] in switcher.commands
     assert invalidated == ["cleared"]
     assert selections[-1]["reason"] == "switch"
     assert selections[-1]["force_generation"] is True
@@ -169,6 +178,7 @@ def test_workerbee_switch_preview_apply_and_rollback(tmp_path: Path) -> None:
     assert rolled_back["phase"] == "rolled_back"
     assert rolled_back["rollback"]["after"]["backend"] == "oss"
     assert switcher.backend == "oss"
+    assert ["switch-test", "switch-oss", "--json"] in switcher.commands
     assert invalidated == ["cleared", "cleared"]
     assert selections[-1]["reason"] == "rollback"
     assert selections[-1]["provenance"]["backend"] == "oss"
@@ -203,6 +213,26 @@ def test_workerbee_switch_requires_matching_fresh_privileged_preview(tmp_path: P
         )
 
 
+def test_legacy_switch_preview_without_descriptor_still_applies(tmp_path: Path) -> None:
+    switcher = FakeSwitcher()
+    manager = service(tmp_path, switcher)
+    preview = manager.preview("platform_debug")
+    transaction_id = preview["transaction_id"]
+    path = tmp_path / "switch-state" / "transactions" / f"{transaction_id}.json"
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted.pop("target_descriptor")
+    path.write_text(json.dumps(persisted), encoding="utf-8")
+    restarted = service(tmp_path, switcher)
+    result = restarted.apply(
+        transaction_id,
+        preview_token=preview["preview_token"],
+        confirm_target="platform_debug",
+        confirm_privileged=True,
+    )
+    assert result["phase"] == "verified"
+    assert result["after"]["backend"] == "platform_debug"
+
+
 def test_workerbee_switch_failed_verification_automatically_rolls_back(
     tmp_path: Path,
 ) -> None:
@@ -230,14 +260,7 @@ def test_workerbee_switch_command_failure_records_unchanged_backend(
     switcher = FakeSwitcher()
     manager = service(tmp_path, switcher)
     preview = manager.preview("platform_debug")
-    original = switcher.__call__
-
-    def fail_apply(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if command[:2] == ["switch-test", "switch-debug"] and "--dry-run" not in command:
-            return subprocess.CompletedProcess(command, 1, "", "apply refused")
-        return original(command, **kwargs)
-
-    manager.runner = fail_apply
+    switcher.fail_apply = True
     result = manager.apply(
         preview["transaction_id"],
         preview_token=preview["preview_token"],
@@ -251,7 +274,8 @@ def test_workerbee_switch_command_failure_records_unchanged_backend(
 
 
 def test_workerbee_switch_status_requires_generation_guard(tmp_path: Path) -> None:
-    manager = service(tmp_path, FakeSwitcher("platform_debug"))
+    switcher = FakeSwitcher("platform_debug")
+    manager = service(tmp_path, switcher)
 
     result = manager.status()
 
@@ -267,6 +291,150 @@ def test_workerbee_switch_status_requires_generation_guard(tmp_path: Path) -> No
     )
     assert user_appliance["available"] is False
     assert "deferred" in user_appliance["unavailable_reason"].lower()
+    catalog = {item["backend"]: item for item in result["backend_catalog"]}
+    assert {key: item["source_mode"] for key, item in catalog.items()} == {
+        "oss": "native-direct",
+        "platform_debug": "snapshot-import",
+        "user_appliance": "managed-clone",
+    }
+    assert catalog["oss"]["qualification"] == "legacy_switcher"
+    assert catalog["oss"]["instance_id"] is None
+    assert len(catalog["oss"]["configuration_sha256"]) == 64
+    assert catalog["oss"]["configuration_sha256"] != catalog["platform_debug"]["configuration_sha256"]
+    registry = WorkerBeeRuntimeRegistry(tmp_path / "runtime")
+    observed = registry.observe(result["active"])
+    assert catalog["platform_debug"]["instance_id"] == observed.instance_id
+    assert user_appliance["configuration_sha256"] is None
+    assert switcher.commands == [["status-test"]]
+
+    with pytest.raises(ValueError, match="qualification is deferred"):
+        manager.preview("user-appliance")
+    assert switcher.commands == [["status-test"]]
+
+
+def test_workerbee_switch_discovery_reports_missing_host_commands(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AGENT_PBX_WORKERBEE_SWITCHER_BIN", raising=False)
+    monkeypatch.delenv("AGENT_PBX_WORKERBEE_SWITCHER_STATUS_BIN", raising=False)
+
+    def unexpected_command(*_args, **_kwargs):
+        raise AssertionError("missing tools must not invoke a host command")
+
+    manager = WorkerBeeSwitchService(
+        state_root=tmp_path,
+        which=lambda _: None,
+        runner=unexpected_command,
+    )
+    report = manager.status()
+    assert report["available"] is False
+    assert report["targets"] == []
+    assert report["active"]["ready"] is False
+    with pytest.raises(ValueError, match="wb-mcp-switch is not configured"):
+        manager.preview("oss")
+
+
+class IsolatedApplianceAdapter:
+    platform_debug_posture = "loopback"
+
+    def __init__(self) -> None:
+        self.backend = "oss"
+        self.digest = "b" * 64
+        self.calls: list[tuple[str, str]] = []
+
+    def descriptors(self) -> tuple[WorkerBeeSwitchBackend, ...]:
+        return (
+            WorkerBeeSwitchBackend("oss", "verified", "a" * 64),
+            WorkerBeeSwitchBackend("user_appliance", "verified", self.digest),
+        )
+
+    def discover(self) -> dict[str, object]:
+        return {
+            "backend": self.backend,
+            "endpoint": f"http://127.0.0.1/{self.backend}/mcp",
+            "server_name": self.backend,
+            "server_version": "fixture",
+            "ready": True,
+        }
+
+    def preflight(self, target: str) -> str:
+        self.calls.append(("preflight", target))
+        return f"fixture plan for {target}"
+
+    def activate(self, target: str) -> None:
+        self.calls.append(("activate", target))
+        self.backend = target
+
+    def verify(self, target: str, **_kwargs) -> dict[str, object]:
+        self.calls.append(("verify", target))
+        return {
+            "verified": self.backend == target,
+            "after": self.discover(),
+            "capability": {"ready": True},
+            "platform_debug_posture": {},
+        }
+
+    def restore(self, target: str, **kwargs) -> dict[str, object]:
+        self.calls.append(("restore", target))
+        self.backend = target
+        return self.verify(target, **kwargs)
+
+
+def test_workerbee_switch_uses_qualified_isolated_adapter_for_appliance(tmp_path: Path) -> None:
+    adapter = IsolatedApplianceAdapter()
+    manager = WorkerBeeSwitchService(state_root=tmp_path, adapter=adapter)
+
+    preview = manager.preview("user-appliance")
+    assert preview["target_descriptor"]["source_mode"] == "managed-clone"
+    assert preview["target_descriptor"]["qualification"] == "verified"
+    args = {
+        "preview_token": preview["preview_token"],
+        "confirm_target": "user-appliance",
+    }
+    adapter.digest = "c" * 64
+    with pytest.raises(ValueError, match="target configuration changed"):
+        manager.apply(preview["transaction_id"], **args)
+    assert adapter.calls == [("preflight", "user_appliance")]
+    adapter.digest = "b" * 64
+    assert manager.apply(preview["transaction_id"], **args)["phase"] == "verified"
+    assert manager.rollback(preview["transaction_id"], confirm=True)["phase"] == "rolled_back"
+    assert adapter.calls == [
+        ("preflight", "user_appliance"),
+        ("activate", "user_appliance"),
+        ("verify", "user_appliance"),
+        ("restore", "oss"),
+        ("verify", "oss"),
+    ]
+
+
+def test_workerbee_appliance_never_qualifies_through_legacy_switcher() -> None:
+    with pytest.raises(ValueError, match="supports only OSS and platform debug"):
+        WorkerBeeSwitchBackend("user_appliance", "legacy_switcher", "a" * 64)
+
+
+def test_workerbee_switch_rejects_inconsistent_adapter_verification(tmp_path: Path) -> None:
+    class MismatchedAdapter(IsolatedApplianceAdapter):
+        def verify(self, target: str, **kwargs) -> dict[str, object]:
+            result = super().verify(target, **kwargs)
+            if target == "user_appliance":
+                result["after"] = {**self.discover(), "backend": "oss"}
+            return result
+
+    adapter = MismatchedAdapter()
+    selections = []
+    manager = WorkerBeeSwitchService(
+        state_root=tmp_path,
+        adapter=adapter,
+        selection_recorder=lambda *args, **kwargs: selections.append((args, kwargs)),
+    )
+    preview = manager.preview("appliance")
+    result = manager.apply(
+        preview["transaction_id"],
+        preview_token=preview["preview_token"],
+        confirm_target="appliance",
+    )
+    assert result["phase"] == "failed_rolled_back"
+    assert "mismatched verification evidence" in result["failure"]
+    assert result["automatic_rollback"]["after"]["backend"] == "oss"
+    assert selections == []
 
 
 def test_workerbee_native_lan_posture_is_previewed_applied_and_verified(

@@ -53,6 +53,22 @@ def workspace_strategy_for_backend(backend: str) -> str:
     raise ValueError(f"unsupported WorkerBee backend: {backend}")
 
 
+def _runtime_identity_fields(provenance: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "backend": canonical_workerbee_backend(provenance.get("backend")),
+        "endpoint": str(provenance.get("endpoint") or "").strip().rstrip("/"),
+        "server_name": str(provenance.get("server_name") or "").strip(),
+        "server_version": str(provenance.get("server_version") or "").strip(),
+        "config_path": str(provenance.get("config_path") or "").strip(),
+    }
+
+
+def runtime_fingerprint(provenance: Mapping[str, Any]) -> str:
+    fields = _runtime_identity_fields(provenance)
+    encoded = json.dumps(fields, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
 def _atomic_private_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.parent.chmod(0o700)
@@ -146,21 +162,13 @@ class WorkerBeeRuntimeRegistry:
         reason: str = "observed",
         force_generation: bool = False,
     ) -> WorkerBeeRuntimeSelection:
-        backend = canonical_workerbee_backend(provenance.get("backend"))
+        selected_fields = _runtime_identity_fields(provenance)
+        backend = selected_fields["backend"]
         if backend not in WORKERBEE_BACKENDS:
             raise ValueError(f"unsupported WorkerBee backend: {backend or '-'}")
-        endpoint = str(provenance.get("endpoint") or "").strip()
-        if not endpoint:
+        if not selected_fields["endpoint"]:
             raise ValueError("WorkerBee runtime provenance is missing an endpoint")
-        selected_fields = {
-            "backend": backend,
-            "endpoint": endpoint.rstrip("/"),
-            "server_name": str(provenance.get("server_name") or "").strip(),
-            "server_version": str(provenance.get("server_version") or "").strip(),
-            "config_path": str(provenance.get("config_path") or "").strip(),
-        }
-        encoded = json.dumps(selected_fields, sort_keys=True, separators=(",", ":"))
-        fingerprint = hashlib.sha256(encoded.encode()).hexdigest()
+        fingerprint = runtime_fingerprint(selected_fields)
         now = self.clock()
         with self._lock:
             prior = self.selected()

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import os
@@ -13,52 +12,22 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
-from .workerbee_mcp import (
-    WorkerBeeBackendProvenance,
-    inspect_workerbee_mcp,
-    inspect_workerbee_switcher,
+from .workerbee_backend_adapter import (
+    LegacyWorkerBeeBackendAdapter,
+    WorkerBeeBackendAdapter,
+    WorkerBeeSwitchBackend,
+    canonical_platform_debug_posture,
 )
 from .workerbee_runtime import canonical_workerbee_backend
 
 
 WORKERBEE_SWITCH_API_VERSION = "agent-pbx.workerbee-switch/v1"
-WORKERBEE_SWITCH_BIN_ENV = "AGENT_PBX_WORKERBEE_SWITCHER_BIN"
-WORKERBEE_SWITCH_STATUS_BIN_ENV = "AGENT_PBX_WORKERBEE_SWITCHER_STATUS_BIN"
-WORKERBEE_PLATFORM_DEBUG_POSTURE_ENV = (
-    "AGENT_PBX_WORKERBEE_PLATFORM_DEBUG_POSTURE"
-)
-WORKERBEE_SWITCH_TARGETS = ("oss", "platform_debug")
-WORKERBEE_PLATFORM_DEBUG_POSTURES = ("loopback", "native_lan")
-DEFAULT_PLATFORM_DEBUG_POSTURE = "loopback"
 TRANSACTION_ID_PATTERN = re.compile(r"^[a-f0-9]{24}$")
 DEFAULT_PREVIEW_TTL_SECONDS = 15 * 60
 
 
 def _canonical_backend(value: object) -> str:
     return canonical_workerbee_backend(value)
-
-
-def _canonical_platform_debug_posture(value: object) -> str:
-    resolved = str(value or DEFAULT_PLATFORM_DEBUG_POSTURE).strip().lower()
-    resolved = resolved.replace("-", "_")
-    aliases = {
-        "lan": "native_lan",
-        "native": "native_lan",
-        "native_caddy": "native_lan",
-    }
-    resolved = aliases.get(resolved, resolved)
-    if resolved not in WORKERBEE_PLATFORM_DEBUG_POSTURES:
-        choices = ", ".join(WORKERBEE_PLATFORM_DEBUG_POSTURES)
-        raise ValueError(
-            f"unsupported WorkerBee platform-debug posture {value!r}; choose {choices}"
-        )
-    return resolved
-
-
-def _provenance_dict(value: WorkerBeeBackendProvenance) -> dict[str, Any]:
-    result = value.public_dict()
-    result["backend"] = _canonical_backend(result.get("backend"))
-    return result
 
 
 def _fingerprint(value: Mapping[str, Any]) -> str:
@@ -112,32 +81,32 @@ class WorkerBeeSwitchService:
         preview_ttl_seconds: int = DEFAULT_PREVIEW_TTL_SECONDS,
         clock: Callable[[], float] = time.time,
         which: Callable[[str], str | None] = shutil.which,
+        adapter: WorkerBeeBackendAdapter | None = None,
     ) -> None:
         self.state_root = state_root.expanduser().resolve()
-        self.runner = runner
         self.clock = clock
         self.preview_ttl_seconds = max(30, int(preview_ttl_seconds))
         self.cache_invalidator = cache_invalidator or (lambda: None)
         self.impact_provider = impact_provider or (lambda: {})
         self.selection_recorder = selection_recorder
-        self.capability_probe = capability_probe or self._default_capability_probe
-        self.platform_debug_posture = _canonical_platform_debug_posture(
-            platform_debug_posture
-            or os.getenv(WORKERBEE_PLATFORM_DEBUG_POSTURE_ENV)
-            or DEFAULT_PLATFORM_DEBUG_POSTURE
+        self.adapter = adapter if adapter is not None else LegacyWorkerBeeBackendAdapter(
+            switch_bin=switch_bin,
+            status_bin=status_bin,
+            platform_debug_posture=platform_debug_posture,
+            runner=runner,
+            capability_probe=capability_probe,
+            which=which,
         )
-        configured_switch = str(
-            switch_bin or os.getenv(WORKERBEE_SWITCH_BIN_ENV) or ""
-        ).strip()
-        configured_status = str(
-            status_bin or os.getenv(WORKERBEE_SWITCH_STATUS_BIN_ENV) or ""
-        ).strip()
-        self.switch_bin = configured_switch or str(which("wb-mcp-switch") or "")
-        self.status_bin = configured_status or str(which("wb-mcp-status") or "")
         self._lock = threading.Lock()
 
+    @property
+    def platform_debug_posture(self) -> str:
+        return self.adapter.platform_debug_posture
+
     def status(self) -> dict[str, Any]:
-        active = self._current_state()
+        active = self.adapter.discover()
+        descriptors = self._descriptors()
+        targets = [item.backend for item in descriptors.values() if item.available]
         impact = dict(self.impact_provider() or {})
         active_backend = _canonical_backend(active.get("backend"))
         observed_posture = str(active.get("platform_debug_posture") or "")
@@ -147,8 +116,8 @@ class WorkerBeeSwitchService:
         )
         return {
             "api_version": WORKERBEE_SWITCH_API_VERSION,
-            "available": bool(self.switch_bin and self.status_bin),
-            "targets": list(WORKERBEE_SWITCH_TARGETS),
+            "available": bool(targets),
+            "targets": targets,
             "active": active,
             "platform_debug_posture": {
                 "expected": self.platform_debug_posture,
@@ -160,31 +129,15 @@ class WorkerBeeSwitchService:
             "generation_guard_required": True,
             "impact": impact,
             "backend_catalog": [
-                {
-                    "backend": "oss",
-                    "available": True,
-                    "workspace_strategy": "direct_host",
-                },
-                {
-                    "backend": "user_appliance",
-                    "available": False,
-                    "workspace_strategy": "managed_appliance_volume",
-                    "unavailable_reason": "Live user-appliance image qualification is deferred.",
-                },
-                {
-                    "backend": "platform_debug",
-                    "available": True,
-                    "workspace_strategy": "content_addressed_import",
-                    "posture": self.platform_debug_posture,
-                },
+                item.public_dict(active) for item in descriptors.values()
             ],
         }
 
     def preview(self, target: str) -> dict[str, Any]:
-        resolved_target = self._target(target)
         with self._lock:
-            self._require_tools()
-            before = self._current_state()
+            descriptor = self._require_target(target)
+            resolved_target = descriptor.backend
+            before = self.adapter.discover()
             repairable_posture_drift = bool(
                 resolved_target == "platform_debug"
                 and _canonical_backend(before.get("backend")) == "platform_debug"
@@ -197,12 +150,13 @@ class WorkerBeeSwitchService:
                 raise ValueError(
                     "WorkerBee status is not ready; repair the active backend before switching"
                 )
+            self._require_target(before.get("backend"))
             impact = dict(self.impact_provider() or {})
             if int(impact.get("mutation_count") or 0) > 0:
                 raise ValueError(
                     "WorkerBee backend switch is blocked by active mutating tool calls"
                 )
-            plan = self._run_switch(resolved_target, dry_run=True)
+            plan = self.adapter.preflight(resolved_target)
             now = self.clock()
             transaction_id = secrets.token_hex(12)
             preview_token = secrets.token_urlsafe(24)
@@ -212,6 +166,7 @@ class WorkerBeeSwitchService:
                 "preview_token": preview_token,
                 "phase": "previewed",
                 "target": resolved_target,
+                "target_descriptor": descriptor.public_dict(before),
                 "target_platform_debug_posture": (
                     self.platform_debug_posture
                     if resolved_target == "platform_debug"
@@ -249,7 +204,7 @@ class WorkerBeeSwitchService:
                 confirm_target=confirm_target,
                 confirm_privileged=confirm_privileged,
             )
-            before_now = self._current_state()
+            before_now = self.adapter.discover()
             impact = dict(self.impact_provider() or {})
             if int(impact.get("mutation_count") or 0) > 0:
                 raise ValueError(
@@ -279,9 +234,9 @@ class WorkerBeeSwitchService:
                 self._record_selection(before_now, reason="verified_noop", force_generation=False)
                 return self._public_record(record)
             try:
-                self._run_switch(target, dry_run=False)
+                self.adapter.activate(target)
             except Exception as exc:  # noqa: BLE001 - preserve recovery evidence
-                current = self._current_state()
+                current = self.adapter.discover()
                 unchanged = _fingerprint(current) == record["before_fingerprint"]
                 rollback = (
                     {"verified": True, "unchanged": True, "after": current}
@@ -307,10 +262,17 @@ class WorkerBeeSwitchService:
                 )
                 self._save(record)
                 return self._public_record(record)
-            result = self._verify_target(
-                target,
-                expected_platform_debug_posture=target_posture or None,
-            )
+            try:
+                result = self.adapter.verify(
+                    target,
+                    expected_platform_debug_posture=target_posture or None,
+                )
+            except Exception as exc:  # noqa: BLE001 - use the existing recovery path
+                result = {
+                    "verified": False,
+                    "message": f"backend verification failed ({type(exc).__name__})",
+                }
+            result = self._checked_verification(result, target, target_posture)
             if not result["verified"]:
                 rollback = self._safe_restore_backend(
                     _canonical_backend(record["before"].get("backend")),
@@ -412,23 +374,53 @@ class WorkerBeeSwitchService:
         *,
         platform_debug_posture: str | None = None,
     ) -> dict[str, Any]:
-        if backend not in WORKERBEE_SWITCH_TARGETS:
+        try:
+            self._require_target(backend)
+        except ValueError:
             return {
                 "verified": False,
                 "message": f"prior backend {backend or '-'} is not switchable",
             }
         effective_posture = (
-            _canonical_platform_debug_posture(
+            canonical_platform_debug_posture(
                 platform_debug_posture or self.platform_debug_posture
             )
             if backend == "platform_debug"
             else None
         )
-        self._run_switch(backend, dry_run=False)
-        return self._verify_target(
+        result = self.adapter.restore(
             backend,
             expected_platform_debug_posture=effective_posture,
         )
+        return self._checked_verification(result, backend, effective_posture or "")
+
+    @staticmethod
+    def _checked_verification(
+        result: dict[str, Any], target: str, target_posture: str
+    ) -> dict[str, Any]:
+        if result.get("verified") is not True:
+            return {**result, "verified": False}
+        after = result.get("after")
+        capability = result.get("capability")
+        if (
+            not isinstance(after, Mapping)
+            or after.get("ready") is not True
+            or _canonical_backend(after.get("backend")) != target
+            or not isinstance(after.get("endpoint"), str)
+            or not after["endpoint"].strip()
+            or not isinstance(capability, Mapping)
+            or capability.get("ready") is not True
+            or (
+                target == "platform_debug"
+                and after.get("platform_debug_posture") != target_posture
+            )
+        ):
+            return {
+                **result,
+                "verified": False,
+                "message": "WorkerBee adapter returned mismatched verification evidence.",
+            }
+        return result
 
     def _safe_restore_backend(
         self,
@@ -447,220 +439,22 @@ class WorkerBeeSwitchService:
                 "message": f"rollback failed ({type(exc).__name__})",
             }
 
-    def _verify_target(
-        self,
-        target: str,
-        *,
-        expected_platform_debug_posture: str | None = None,
-    ) -> dict[str, Any]:
-        after = self._current_state()
-        expected_posture = (
-            _canonical_platform_debug_posture(expected_platform_debug_posture)
-            if target == "platform_debug"
-            else ""
-        )
-        posture_ready = bool(
-            target != "platform_debug"
-            or after.get("platform_debug_posture") == expected_posture
-        )
-        backend_ready = bool(
-            after.get("ready")
-            and _canonical_backend(after.get("backend")) == target
-            and after.get("endpoint")
-            and posture_ready
-        )
-        capability: Mapping[str, Any] = {
-            "ready": False,
-            "code": "WORKERBEE_SWITCH_NOT_PROBED",
-        }
-        if backend_ready:
-            try:
-                capability = dict(self.capability_probe(str(after["endpoint"])))
-            except Exception as exc:  # noqa: BLE001 - transaction records the failure
-                capability = {
-                    "ready": False,
-                    "code": "WORKERBEE_SWITCH_CAPABILITY_FAILED",
-                    "message": type(exc).__name__,
-                }
-        verified = backend_ready and bool(capability.get("ready"))
-        return {
-            "verified": verified,
-            "after": after,
-            "capability": dict(capability),
-            "platform_debug_posture": {
-                "expected": expected_posture,
-                "observed": str(after.get("platform_debug_posture") or ""),
-                "ready": posture_ready,
-            },
-            "message": (
-                "WorkerBee backend and bootstrap capabilities verified."
-                if verified
-                else (
-                    "WorkerBee platform-debug posture verification failed."
-                    if target == "platform_debug" and not posture_ready
-                    else "WorkerBee backend or bootstrap capability verification failed."
-                )
-            ),
-        }
+    def _descriptors(self) -> dict[str, WorkerBeeSwitchBackend]:
+        result: dict[str, WorkerBeeSwitchBackend] = {}
+        for item in self.adapter.descriptors():
+            if item.backend in result:
+                raise ValueError(f"duplicate WorkerBee backend descriptor: {item.backend}")
+            result[item.backend] = item
+        return result
 
-    def _run_switch(
-        self,
-        target: str,
-        *,
-        dry_run: bool,
-    ) -> str:
-        command = [
-            self.switch_bin,
-            "switch-debug" if target == "platform_debug" else "switch-oss",
-        ]
-        if dry_run:
-            command.append("--dry-run")
-        command.append("--json")
-        if target == "platform_debug":
-            command.append("--confirm-platform-debug")
-        try:
-            result = self.runner(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=180 if not dry_run else 45,
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"WorkerBee switch command failed ({type(exc).__name__})"
-            ) from exc
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "switch command failed").strip()
-            raise RuntimeError(f"WorkerBee switch command exited {result.returncode}: {detail}")
-        return str(result.stdout or result.stderr or "").strip()
-
-    def _inspect(self) -> WorkerBeeBackendProvenance:
-        return inspect_workerbee_switcher(
-            status_bin=self.status_bin or None,
-            runner=self.runner,
-        )
-
-    def _current_state(self) -> dict[str, Any]:
-        provenance = _provenance_dict(self._inspect())
-        payload = self._status_payload()
-        status = payload.get("status") if isinstance(payload, dict) else {}
-        config = payload.get("config") if isinstance(payload, dict) else {}
-        if not isinstance(status, dict):
-            status = {}
-        if not isinstance(config, dict):
-            config = {}
-        if (
-            status.get("api_version") == "workerbee.mcp_switch_status/v1"
-            and config.get("api_version") == "workerbee.mcp_switch_config/v1"
-            and status.get("backend")
-            and status.get("mcp_endpoint")
-        ):
-            mcp = status.get("mcp") if isinstance(status.get("mcp"), dict) else {}
-            server_info = (
-                mcp.get("server_info")
-                if isinstance(mcp.get("server_info"), dict)
-                else {}
-            )
-            provenance.update(
-                backend=_canonical_backend(status.get("backend")),
-                endpoint=str(status.get("mcp_endpoint") or ""),
-                server_name=str(server_info.get("name") or ""),
-                server_version=str(server_info.get("version") or ""),
-                config_path=str(config.get("path") or ""),
-            )
-        provenance["platform_debug_posture"] = self._observed_platform_debug_posture(
-            provenance,
-            status=status,
-        )
-        return provenance
-
-    def _status_payload(self) -> dict[str, Any]:
-        if not self.status_bin:
-            return {}
-        try:
-            result = self.runner(
-                [self.status_bin],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            payload = json.loads(result.stdout)
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TypeError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
-
-    def _observed_platform_debug_posture(
-        self,
-        provenance: Mapping[str, Any],
-        *,
-        status: Mapping[str, Any] | None = None,
-    ) -> str:
-        if _canonical_backend(provenance.get("backend")) != "platform_debug":
-            return ""
-        status = status if isinstance(status, Mapping) else {}
-        candidates: list[object] = [
-            status.get("platform_debug_observed_posture"),
-            status.get("platform_debug_posture"),
-            status.get("debug_posture"),
-        ]
-        observed_detail = status.get("observed_posture")
-        if isinstance(observed_detail, Mapping):
-            candidates.insert(0, observed_detail.get("posture"))
-        else:
-            candidates.insert(0, observed_detail)
-        posture_detail = status.get("platform_debug_posture")
-        if isinstance(posture_detail, dict):
-            candidates = [
-                posture_detail.get("observed"),
-                posture_detail.get("runtime"),
-                *candidates,
-            ]
-        for field in ("debug_lan", "debug_lan_bridge"):
-            value = status.get(field)
-            if isinstance(value, dict):
-                candidates.extend(
-                    (
-                        value.get("platform_debug_posture"),
-                        value.get("posture"),
-                        value.get("mode"),
-                    )
-                )
-                if str(value.get("status") or "").strip().lower() in {
-                    "active",
-                    "ready",
-                }:
-                    candidates.append("native_lan")
-        for candidate in candidates:
-            if not str(candidate or "").strip():
-                continue
-            try:
-                return _canonical_platform_debug_posture(candidate)
-            except ValueError:
-                continue
-        # Older switchers expose no posture field. Their platform-debug command
-        # is the committed loopback-only baseline, so retain that compatibility
-        # while requiring explicit evidence for native-LAN verification.
-        return DEFAULT_PLATFORM_DEBUG_POSTURE
-
-    @staticmethod
-    def _default_capability_probe(endpoint: str) -> Mapping[str, Any]:
-        result = asyncio.run(inspect_workerbee_mcp(endpoint))
-        return result.public_dict()
-
-    @staticmethod
-    def _target(target: str) -> str:
+    def _require_target(self, target: object) -> WorkerBeeSwitchBackend:
         resolved = _canonical_backend(target)
-        if resolved not in WORKERBEE_SWITCH_TARGETS:
-            raise ValueError(
-                f"unsupported WorkerBee backend {target!r}; choose oss or platform_debug"
-            )
-        return resolved
-
-    def _require_tools(self) -> None:
-        if not self.switch_bin:
-            raise ValueError("wb-mcp-switch is not configured")
-        if not self.status_bin:
-            raise ValueError("wb-mcp-status is not configured")
+        descriptor = self._descriptors().get(resolved)
+        if descriptor is None:
+            raise ValueError(f"unsupported WorkerBee backend {target!r}")
+        if not descriptor.available:
+            raise ValueError(descriptor.unavailable_reason)
+        return descriptor
 
     def _validate_preview(
         self,
@@ -679,8 +473,23 @@ class WorkerBeeSwitchService:
         if self.clock() > float(record.get("expires_at") or 0):
             raise ValueError("switch preview expired; create a fresh preview")
         target = str(record.get("target") or "")
-        if self._target(confirm_target) != target:
+        if _canonical_backend(confirm_target) != target:
             raise ValueError("confirmed backend does not match the preview")
+        descriptor = self._require_target(target)
+        approved = record.get("target_descriptor")
+        if "target_descriptor" not in record:
+            # Receipts predating descriptors retain the legacy command contract
+            # for OSS/debug only.
+            if not isinstance(self.adapter, LegacyWorkerBeeBackendAdapter) or (
+                descriptor.qualification != "legacy_switcher"
+            ):
+                raise ValueError("switch preview lacks a qualified backend descriptor")
+        elif not isinstance(approved, dict) or any(
+            approved.get(key) != value
+            for key, value in descriptor.public_dict({}).items()
+            if key != "instance_id"
+        ):
+            raise ValueError("WorkerBee target configuration changed after preview")
         if target == "platform_debug" and not confirm_privileged:
             raise ValueError("platform_debug requires privileged-backend confirmation")
 
