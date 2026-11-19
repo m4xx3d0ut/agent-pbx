@@ -114,7 +114,7 @@ class CodexRuntimeService:
         self.catalog_loader = catalog_loader or inspect_codex_model_catalog
         self.model_policy = load_codex_model_policy()
         self._model_catalog: tuple[Any, ...] = ()
-        self._model_catalog_loaded_at = 0.0
+        self._model_catalog_loaded_at: float | None = None
         self._records: dict[str, RuntimeRecord] = {}
         self._lock = threading.RLock()
         self._branch_cache: dict[str, tuple[float, str | None]] = {}
@@ -634,7 +634,8 @@ class CodexRuntimeService:
 
     def _catalog(self) -> tuple[Any, ...]:
         now = time.monotonic()
-        if now - self._model_catalog_loaded_at > 300.0:
+        loaded_at = self._model_catalog_loaded_at
+        if loaded_at is None or now - loaded_at > 300.0:
             try:
                 self._model_catalog = tuple(self.catalog_loader())
             except Exception:  # noqa: BLE001 - classification degrades to stale.

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from agent_pbx.api import create_app
+from agent_pbx.codex import runtime as codex_runtime
 from agent_pbx.codex.runtime import CodexRuntimeService
 from agent_pbx.codex_cli import CodexModelOption
 from agent_pbx.config import ServerConfig
@@ -311,10 +312,40 @@ def compatibility_model_catalog() -> tuple[CodexModelOption, ...]:
     )
 
 
+def test_runtime_model_catalog_loads_at_monotonic_zero_and_respects_ttl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 0.0
+    monkeypatch.setattr(
+        codex_runtime,
+        "time",
+        SimpleNamespace(monotonic=lambda: now),
+    )
+    calls: list[float] = []
+
+    def load_catalog() -> tuple[CodexModelOption, ...]:
+        calls.append(now)
+        return direct_model_catalog() if len(calls) == 1 else ()
+
+    _client, app = runtime_client(tmp_path)
+    service = CodexRuntimeService(app.state.store, catalog_loader=load_catalog)
+    assert service._catalog() == direct_model_catalog()
+    assert calls == [0.0]
+    now = 300.0
+    assert service._catalog() == direct_model_catalog()
+    assert calls == [0.0]
+    now = 301.0
+    assert service._catalog() == ()
+    now = 302.0
+    assert service._catalog() == ()
+    assert calls == [0.0, 301.0]
+
+
 def test_runtime_direct_model_choice_can_be_adopted_per_entity(tmp_path: Path) -> None:
     client, app = runtime_client(tmp_path)
     app.state.codex_runtime.catalog_loader = direct_model_catalog
-    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+    app.state.codex_runtime._model_catalog_loaded_at = None
 
     observed = client.post(
         "/v2/agents/agent-a/codex-runtime/events",
@@ -370,7 +401,7 @@ def test_runtime_adoption_revalidates_provider_and_catalog_evidence(
 ) -> None:
     client, app = runtime_client(tmp_path)
     app.state.codex_runtime.catalog_loader = lambda: catalog
-    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+    app.state.codex_runtime._model_catalog_loaded_at = None
 
     observed = client.post(
         "/v2/agents/agent-a/codex-runtime/events",
@@ -403,7 +434,7 @@ def test_runtime_adoption_revalidates_provider_and_catalog_evidence(
 def test_runtime_adoption_rechecks_catalog_after_observation(tmp_path: Path) -> None:
     client, app = runtime_client(tmp_path)
     app.state.codex_runtime.catalog_loader = direct_model_catalog
-    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+    app.state.codex_runtime._model_catalog_loaded_at = None
     observed = client.post(
         "/v2/agents/agent-a/codex-runtime/events",
         headers=HEADERS,
@@ -424,7 +455,7 @@ def test_runtime_adoption_rechecks_catalog_after_observation(tmp_path: Path) -> 
     assert observed.json()["profile"]["selection_class"] == "managed_qualified"
 
     app.state.codex_runtime.catalog_loader = lambda: ()
-    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+    app.state.codex_runtime._model_catalog_loaded_at = None
     adopted = client.post(
         "/v2/agents/agent-a/codex-runtime/adopt-model",
         headers=HEADERS,
@@ -437,7 +468,7 @@ def test_runtime_direct_elevation_cannot_be_adopted_without_lease(
 ) -> None:
     client, app = runtime_client(tmp_path)
     app.state.codex_runtime.catalog_loader = direct_model_catalog
-    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+    app.state.codex_runtime._model_catalog_loaded_at = None
     observed = client.post(
         "/v2/agents/agent-a/codex-runtime/events",
         headers=HEADERS,
@@ -470,7 +501,7 @@ def test_runtime_direct_elevation_can_be_adopted_with_matching_active_lease(
 ) -> None:
     client, app = runtime_client(tmp_path)
     app.state.codex_runtime.catalog_loader = direct_model_catalog
-    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+    app.state.codex_runtime._model_catalog_loaded_at = None
     requested = client.post(
         "/v2/codex/elevations",
         headers=HEADERS,
@@ -534,7 +565,7 @@ def test_runtime_custom_provider_elevation_is_rejected_even_with_lease(
 ) -> None:
     client, app = runtime_client(tmp_path)
     app.state.codex_runtime.catalog_loader = direct_model_catalog
-    app.state.codex_runtime._model_catalog_loaded_at = 0.0
+    app.state.codex_runtime._model_catalog_loaded_at = None
     requested = client.post(
         "/v2/codex/elevations",
         headers=HEADERS,
@@ -622,7 +653,7 @@ def test_runtime_legacy_alias_lease_matches_canonical_observed_profile(
 ) -> None:
     legacy_client, legacy_app = runtime_client(tmp_path)
     legacy_app.state.codex_runtime.catalog_loader = compatibility_model_catalog
-    legacy_app.state.codex_runtime._model_catalog_loaded_at = 0.0
+    legacy_app.state.codex_runtime._model_catalog_loaded_at = None
 
     legacy_lease, _created = legacy_app.state.store.request_or_reuse_model_elevation(
         agent_id="agent-a",
