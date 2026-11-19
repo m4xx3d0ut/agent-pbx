@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -25,19 +24,13 @@ from ..schemas import (
     WorkerBeeGatewayLeaseRequest,
     WorkerBeeSnapshotPolicyRequest,
     WorkerBeeStatusResponse,
-    WorkerBeeSwitchApplyRequest,
-    WorkerBeeSwitchPreviewRequest,
-    WorkerBeeSwitchRollbackRequest,
     WorkerBeeWorkspacePolicyRequest,
     WorkerBeeWorkspacePrepareRequest,
     WorkerBeeWorkspaceTransitionDecisionRequest,
     WorkerBeeWorkspaceTransitionRequest,
 )
 from ..workerbee import agent_cwd
-from ..workerbee_application import (
-    WorkerBeeApplicationService,
-    finalize_issued_workerbee_lease,
-)
+from ..workerbee_application import WorkerBeeApplicationService, finalize_issued_workerbee_lease
 from ..workerbee_access import WorkerBeeAccessPolicyError
 from ..workerbee_controlled_run import WorkerBeeControlledRunError
 from ..workerbee_gateway import WorkerBeeGatewayError
@@ -51,6 +44,7 @@ from ..workerbee_policy import WorkerBeeWorkspacePolicyError
 from ..workerbee_snapshot_policy import WorkerBeeSnapshotPolicyError
 from ..workerbee_workspace import WorkerBeeWorkspaceError
 from ._shared import require_agent
+from .workerbee_cutover import register_workerbee_switch_routes, wait_workerbee_thread, workerbee_admission
 
 
 def register_workerbee_routes(
@@ -59,13 +53,16 @@ def register_workerbee_routes(
     workerbee_application: WorkerBeeApplicationService,
     call_workerbee_mcp_tool: Any,
 ) -> None:
+    register_workerbee_switch_routes(app)
+    admitted = workerbee_admission(workerbee_application)
+
     async def workerbee_controlled_run_preflight(
         payload: WorkerBeeControlledRunPreflightRequest,
         request: Request,
     ) -> dict[str, Any]:
-        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
+        await wait_workerbee_thread(workerbee_application.refresh_runtime_selection)
         try:
-            result = await asyncio.to_thread(
+            result = await wait_workerbee_thread(
                 request.app.state.workerbee_controlled_runs.preflight,
                 root_operator_agent_id=payload.root_operator_agent_id,
                 target_fork_agent_id=payload.target_fork_agent_id,
@@ -164,7 +161,7 @@ def register_workerbee_routes(
         dependencies=[Depends(require_token)],
     )
     async def workerbee_runtime_status(request: Request) -> dict[str, Any]:
-        return await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
+        return await wait_workerbee_thread(workerbee_application.refresh_runtime_selection)
 
     @app.get(
         "/v2/workerbee/workspace-policy",
@@ -174,10 +171,10 @@ def register_workerbee_routes(
         request: Request,
         _controller: ClientPrincipal = Depends(require_global_controller),
     ) -> dict[str, Any]:
-        view = await asyncio.to_thread(
+        view = await wait_workerbee_thread(
             request.app.state.workerbee_workspace_policy.get_policy
         )
-        view["access_posture"] = await asyncio.to_thread(
+        view["access_posture"] = await wait_workerbee_thread(
             request.app.state.workerbee_access_policy.posture
         )
         return view
@@ -198,7 +195,7 @@ def register_workerbee_routes(
                 status_code=403, detail="controller is not scoped to this Agent"
             )
         try:
-            return await asyncio.to_thread(
+            return await wait_workerbee_thread(
                 workerbee_application.access_readback,
                 agent_id,
             )
@@ -209,6 +206,7 @@ def register_workerbee_routes(
         "/v2/agents/{agent_id}/workerbee/access-profile",
         response_model=dict[str, Any],
     )
+    @admitted("put_agent_workerbee_access_profile")
     async def put_agent_workerbee_access_profile(
         agent_id: str,
         payload: WorkerBeeAccessProfileRequest,
@@ -231,7 +229,7 @@ def register_workerbee_routes(
                     "WORKERBEE_ACCESS_PROFILE_CONFLICT",
                     "profile and access_profile must match when both are supplied.",
                 )
-            result = await asyncio.to_thread(
+            result = await wait_workerbee_thread(
                 request.app.state.workerbee_access_policy.set_policy,
                 agent_id,
                 access_profile=payload.access_profile or payload.profile,
@@ -239,7 +237,7 @@ def register_workerbee_routes(
                 execution_lane=payload.execution_lane,
                 updated_by=controller.token_id or controller.client_id or "local",
             )
-            readback = await asyncio.to_thread(
+            readback = await wait_workerbee_thread(
                 workerbee_application.access_readback,
                 agent_id,
             )
@@ -257,18 +255,19 @@ def register_workerbee_routes(
         _controller: ClientPrincipal = Depends(require_global_controller),
     ) -> dict[str, Any]:
         try:
-            posture = await asyncio.to_thread(
+            posture = await wait_workerbee_thread(
                 request.app.state.workerbee_controlled_runs.posture
             )
         except WorkerBeeControlledRunError as exc:
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
-        posture["runtime"] = await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
+        posture["runtime"] = await wait_workerbee_thread(workerbee_application.refresh_runtime_selection)
         return posture
 
     @app.post(
         "/v2/workerbee/controlled-runs/preflight",
         response_model=dict[str, Any],
     )
+    @admitted("preflight_workerbee_controlled_run", discover=True)
     async def preflight_workerbee_controlled_run(
         payload: WorkerBeeControlledRunPreflightRequest,
         request: Request,
@@ -280,6 +279,7 @@ def register_workerbee_routes(
         "/v2/workerbee/controlled-runs",
         response_model=dict[str, Any],
     )
+    @admitted("create_workerbee_controlled_run", discover=True)
     async def create_workerbee_controlled_run(
         payload: WorkerBeeControlledRunCreateRequest,
         request: Request,
@@ -296,7 +296,7 @@ def register_workerbee_routes(
                 },
             )
         try:
-            return await asyncio.to_thread(
+            return await wait_workerbee_thread(
                 request.app.state.workerbee_controlled_runs.request,
                 root_operator_agent_id=payload.root_operator_agent_id,
                 target_fork_agent_id=payload.target_fork_agent_id,
@@ -329,7 +329,7 @@ def register_workerbee_routes(
         store: Any = Depends(get_store),
     ) -> dict[str, Any]:
         return {
-            "requests": await asyncio.to_thread(
+            "requests": await wait_workerbee_thread(
                 store.list_workerbee_controlled_run_requests,
                 root_operator_agent_id=root_operator_agent_id,
                 target_fork_agent_id=target_fork_agent_id,
@@ -347,7 +347,7 @@ def register_workerbee_routes(
         _controller: ClientPrincipal = Depends(require_global_controller),
         store: Any = Depends(get_store),
     ) -> dict[str, Any]:
-        result = await asyncio.to_thread(
+        result = await wait_workerbee_thread(
             store.get_workerbee_controlled_run_request,
             request_id,
         )
@@ -359,6 +359,7 @@ def register_workerbee_routes(
         "/v2/workerbee/controlled-runs/{request_id}/decision",
         response_model=dict[str, Any],
     )
+    @admitted("decide_workerbee_controlled_run")
     async def decide_workerbee_controlled_run(
         request_id: str,
         payload: WorkerBeeControlledRunDecisionRequest,
@@ -366,7 +367,7 @@ def register_workerbee_routes(
         _controller: ClientPrincipal = Depends(require_global_controller),
     ) -> dict[str, Any]:
         try:
-            result = await asyncio.to_thread(
+            result = await wait_workerbee_thread(
                 request.app.state.workerbee_controlled_runs.decide,
                 request_id,
                 approve=payload.approve,
@@ -412,6 +413,7 @@ def register_workerbee_routes(
         "/v2/workerbee/controlled-runs/{request_id}/leases",
         response_model=dict[str, Any],
     )
+    @admitted("create_workerbee_controlled_run_lease")
     async def create_workerbee_controlled_run_lease(
         request_id: str,
         payload: WorkerBeeControlledRunLeaseCreateRequest,
@@ -419,7 +421,7 @@ def register_workerbee_routes(
         _controller: ClientPrincipal = Depends(require_global_controller),
     ) -> dict[str, Any]:
         try:
-            return await asyncio.to_thread(
+            return await wait_workerbee_thread(
                 request.app.state.workerbee_controlled_runs.request_lease,
                 request_id,
                 requested_by=payload.requested_by,
@@ -444,7 +446,7 @@ def register_workerbee_routes(
         store: Any = Depends(get_store),
     ) -> dict[str, Any]:
         return {
-            "leases": await asyncio.to_thread(
+            "leases": await wait_workerbee_thread(
                 store.list_workerbee_controlled_run_leases,
                 root_operator_agent_id=root_operator_agent_id,
                 status=status_filter,
@@ -456,6 +458,7 @@ def register_workerbee_routes(
         "/v2/workerbee/controlled-run-leases/{lease_id}/decision",
         response_model=dict[str, Any],
     )
+    @admitted("decide_workerbee_controlled_run_lease")
     async def decide_workerbee_controlled_run_lease(
         lease_id: str,
         payload: WorkerBeeControlledRunLeaseDecisionRequest,
@@ -463,7 +466,7 @@ def register_workerbee_routes(
         _controller: ClientPrincipal = Depends(require_global_controller),
     ) -> dict[str, Any]:
         try:
-            return await asyncio.to_thread(
+            return await wait_workerbee_thread(
                 request.app.state.workerbee_controlled_runs.decide_lease,
                 lease_id,
                 approve=payload.approve,
@@ -481,6 +484,7 @@ def register_workerbee_routes(
         "/v2/workerbee/controlled-run-leases/{lease_id}/revoke",
         response_model=dict[str, Any],
     )
+    @admitted("revoke_workerbee_controlled_run_lease")
     async def revoke_workerbee_controlled_run_lease(
         lease_id: str,
         payload: WorkerBeeControlledRunLeaseRevokeRequest,
@@ -488,7 +492,7 @@ def register_workerbee_routes(
         store: Any = Depends(get_store),
     ) -> dict[str, Any]:
         try:
-            return await asyncio.to_thread(
+            return await wait_workerbee_thread(
                 store.revoke_workerbee_controlled_run_lease,
                 lease_id,
                 revoked_by=payload.revoked_by,
@@ -500,13 +504,14 @@ def register_workerbee_routes(
         "/v2/workerbee/workspace-policy",
         response_model=dict[str, Any],
     )
+    @admitted("put_workerbee_workspace_policy")
     async def put_workerbee_workspace_policy(
         payload: WorkerBeeWorkspacePolicyRequest,
         request: Request,
         controller: ClientPrincipal = Depends(require_global_controller),
     ) -> dict[str, Any]:
         try:
-            return await asyncio.to_thread(
+            return await wait_workerbee_thread(
                 request.app.state.workerbee_workspace_policy.set_policy,
                 agent_id=None,
                 policy=payload.policy,
@@ -534,7 +539,7 @@ def register_workerbee_routes(
             raise HTTPException(
                 status_code=403, detail="controller is not scoped to this Agent"
             )
-        return await asyncio.to_thread(
+        return await wait_workerbee_thread(
             request.app.state.workerbee_workspace_policy.get_policy, agent_id
         )
 
@@ -542,6 +547,7 @@ def register_workerbee_routes(
         "/v2/agents/{agent_id}/workerbee/workspace-policy",
         response_model=dict[str, Any],
     )
+    @admitted("put_agent_workerbee_workspace_policy")
     async def put_agent_workerbee_workspace_policy(
         agent_id: str,
         payload: WorkerBeeWorkspacePolicyRequest,
@@ -555,7 +561,7 @@ def register_workerbee_routes(
                 status_code=403, detail="controller is not scoped to this Agent"
             )
         try:
-            return await asyncio.to_thread(
+            return await wait_workerbee_thread(
                 request.app.state.workerbee_workspace_policy.set_policy,
                 agent_id=agent_id,
                 policy=payload.policy,
@@ -572,6 +578,7 @@ def register_workerbee_routes(
         "/v2/agents/{agent_id}/workerbee/workspace-policy",
         response_model=dict[str, Any],
     )
+    @admitted("delete_agent_workerbee_workspace_policy")
     async def delete_agent_workerbee_workspace_policy(
         agent_id: str,
         request: Request,
@@ -584,7 +591,7 @@ def register_workerbee_routes(
                 status_code=403, detail="controller is not scoped to this Agent"
             )
         try:
-            return await asyncio.to_thread(
+            return await wait_workerbee_thread(
                 request.app.state.workerbee_workspace_policy.clear_policy,
                 agent_id,
                 updated_by=controller.token_id or controller.client_id or "local",
@@ -601,7 +608,7 @@ def register_workerbee_routes(
         _controller: ClientPrincipal = Depends(require_global_controller),
     ) -> dict[str, Any]:
         runtime = request.app.state.workerbee_runtime.selected()
-        return await asyncio.to_thread(
+        return await wait_workerbee_thread(
             request.app.state.workerbee_snapshot_policy.get_policy,
             backend=(runtime.backend if runtime is not None else None),
         )
@@ -610,13 +617,14 @@ def register_workerbee_routes(
         "/v2/workerbee/snapshot-policy",
         response_model=dict[str, Any],
     )
+    @admitted("put_workerbee_snapshot_policy")
     async def put_workerbee_snapshot_policy(
         payload: WorkerBeeSnapshotPolicyRequest,
         request: Request,
         controller: ClientPrincipal = Depends(require_global_controller),
     ) -> dict[str, Any]:
         try:
-            return await asyncio.to_thread(
+            return await wait_workerbee_thread(
                 request.app.state.workerbee_snapshot_policy.set_policy,
                 agent_id=None,
                 source_root=payload.source_root,
@@ -646,9 +654,9 @@ def register_workerbee_routes(
             raise HTTPException(
                 status_code=403, detail="controller is not scoped to this Agent"
             )
-        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
+        await wait_workerbee_thread(workerbee_application.refresh_runtime_selection)
         runtime = request.app.state.workerbee_runtime.selected()
-        return await asyncio.to_thread(
+        return await wait_workerbee_thread(
             request.app.state.workerbee_snapshot_policy.get_policy,
             agent_id,
             source_root=agent_cwd(agent),
@@ -659,6 +667,7 @@ def register_workerbee_routes(
         "/v2/agents/{agent_id}/workerbee/snapshot-policy",
         response_model=dict[str, Any],
     )
+    @admitted("put_agent_workerbee_snapshot_policy")
     async def put_agent_workerbee_snapshot_policy(
         agent_id: str,
         payload: WorkerBeeSnapshotPolicyRequest,
@@ -673,7 +682,7 @@ def register_workerbee_routes(
             )
         source_root = str(payload.source_root or agent_cwd(agent) or "").strip()
         try:
-            return await asyncio.to_thread(
+            return await wait_workerbee_thread(
                 request.app.state.workerbee_snapshot_policy.set_policy,
                 agent_id=agent_id,
                 source_root=source_root,
@@ -692,6 +701,7 @@ def register_workerbee_routes(
         "/v2/agents/{agent_id}/workerbee/snapshot-policy",
         response_model=dict[str, Any],
     )
+    @admitted("delete_agent_workerbee_snapshot_policy")
     async def delete_agent_workerbee_snapshot_policy(
         agent_id: str,
         request: Request,
@@ -704,7 +714,7 @@ def register_workerbee_routes(
                 status_code=403, detail="controller is not scoped to this Agent"
             )
         try:
-            return await asyncio.to_thread(
+            return await wait_workerbee_thread(
                 request.app.state.workerbee_snapshot_policy.clear_policy,
                 agent_id,
                 source_root=agent_cwd(agent) or "",
@@ -716,6 +726,7 @@ def register_workerbee_routes(
         "/v2/agents/{agent_id}/workerbee/snapshot-policy/preview",
         response_model=dict[str, Any],
     )
+    @admitted("preview_agent_workerbee_snapshot_policy", discover=True)
     async def preview_agent_workerbee_snapshot_policy(
         agent_id: str,
         request: Request,
@@ -727,14 +738,14 @@ def register_workerbee_routes(
             raise HTTPException(
                 status_code=403, detail="controller is not scoped to this Agent"
             )
-        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
+        await wait_workerbee_thread(workerbee_application.refresh_runtime_selection)
         runtime = request.app.state.workerbee_runtime.selected()
         if runtime is None:
             raise HTTPException(
                 status_code=409, detail="no verified WorkerBee backend is selected"
             )
         try:
-            return await asyncio.to_thread(
+            return await wait_workerbee_thread(
                 request.app.state.workerbee_snapshot_policy.preview,
                 agent_id=agent_id,
                 source_root=agent_cwd(agent) or "",
@@ -759,7 +770,7 @@ def register_workerbee_routes(
             raise HTTPException(
                 status_code=403, detail="controller is not scoped to this Agent"
             )
-        return await asyncio.to_thread(
+        return await wait_workerbee_thread(
             request.app.state.workerbee_workspace_policy.list_transitions,
             agent_id,
             limit=limit,
@@ -769,6 +780,7 @@ def register_workerbee_routes(
         "/v2/agents/{agent_id}/workerbee/workspace-transitions/preview",
         response_model=dict[str, Any],
     )
+    @admitted("preview_workerbee_workspace_transition", discover=True)
     async def preview_workerbee_workspace_transition(
         agent_id: str,
         payload: WorkerBeeWorkspaceTransitionRequest,
@@ -789,16 +801,16 @@ def register_workerbee_routes(
             raise HTTPException(
                 status_code=409, detail="Agent has no active WorkerBee gateway lease"
             )
-        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
+        await wait_workerbee_thread(workerbee_application.refresh_runtime_selection)
         try:
-            lease = await asyncio.to_thread(
+            lease = await wait_workerbee_thread(
                 request.app.state.workerbee_gateway.load, lease_id
             )
-            binding = await asyncio.to_thread(
+            binding = await wait_workerbee_thread(
                 request.app.state.workerbee_workspaces.load,
                 lease.workspace_binding_id,
             )
-            target = await asyncio.to_thread(
+            target = await wait_workerbee_thread(
                 request.app.state.workerbee_workspace_policy.resolve_target,
                 agent_id=agent_id,
                 binding=binding,
@@ -821,6 +833,7 @@ def register_workerbee_routes(
         "/v2/agents/{agent_id}/workerbee/workspace-transitions",
         response_model=dict[str, Any],
     )
+    @admitted("apply_workerbee_workspace_transition", discover=True)
     async def apply_workerbee_workspace_transition(
         agent_id: str,
         payload: WorkerBeeWorkspaceTransitionRequest,
@@ -841,11 +854,11 @@ def register_workerbee_routes(
             raise HTTPException(
                 status_code=409, detail="Agent has no active WorkerBee gateway lease"
             )
-        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
+        await wait_workerbee_thread(workerbee_application.refresh_runtime_selection)
         try:
-            lease, binding, changed = await asyncio.to_thread(
+            lease, binding, changed = await wait_workerbee_thread(
                 request.app.state.workerbee_gateway.transition_workspace,
-                await asyncio.to_thread(
+                await wait_workerbee_thread(
                     request.app.state.workerbee_gateway.load, lease_id
                 ),
                 {
@@ -868,6 +881,7 @@ def register_workerbee_routes(
         "/v2/agents/{agent_id}/workerbee/workspace-transitions/{transition_id}/decision",
         response_model=dict[str, Any],
     )
+    @admitted("decide_workerbee_workspace_transition")
     async def decide_workerbee_workspace_transition(
         agent_id: str,
         transition_id: str,
@@ -895,14 +909,14 @@ def register_workerbee_routes(
                         status_code=409,
                         detail="Only a pending workspace transition can be denied",
                     )
-                denied = await asyncio.to_thread(
+                denied = await wait_workerbee_thread(
                     request.app.state.workerbee_workspace_policy.update_transition,
                     transition_id,
                     status="denied",
                     reason="Denied by controller",
                 )
                 return {"changed": False, "transition": denied}
-            lease, binding, changed = await asyncio.to_thread(
+            lease, binding, changed = await wait_workerbee_thread(
                 request.app.state.workerbee_gateway.apply_transition,
                 transition_id,
                 approved_by=controller.token_id or controller.client_id or "local",
@@ -919,6 +933,7 @@ def register_workerbee_routes(
         "/v2/agents/{agent_id}/workerbee/workspace-transitions/{transition_id}/revert",
         response_model=dict[str, Any],
     )
+    @admitted("revert_workerbee_workspace_transition")
     async def revert_workerbee_workspace_transition(
         agent_id: str,
         transition_id: str,
@@ -939,7 +954,7 @@ def register_workerbee_routes(
                 raise HTTPException(
                     status_code=404, detail="Workspace transition not found"
                 )
-            lease, binding = await asyncio.to_thread(
+            lease, binding = await wait_workerbee_thread(
                 request.app.state.workerbee_gateway.revert_transition,
                 transition_id,
                 reverted_by=controller.token_id or controller.client_id or "local",
@@ -956,6 +971,7 @@ def register_workerbee_routes(
         response_model=dict[str, Any],
         dependencies=[Depends(require_controller)],
     )
+    @admitted("prepare_workerbee_workspace", discover=True)
     async def prepare_workerbee_workspace(
         agent_id: str,
         payload: WorkerBeeWorkspacePrepareRequest,
@@ -969,7 +985,7 @@ def register_workerbee_routes(
                 status_code=409,
                 detail="agent has no scoped cwd and no launch source root was supplied",
             )
-        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
+        await wait_workerbee_thread(workerbee_application.refresh_runtime_selection)
         runtime = request.app.state.workerbee_runtime.selected()
         if runtime is None:
             raise HTTPException(
@@ -994,7 +1010,7 @@ def register_workerbee_routes(
                         "trusted-direct-bind requires a registered Agent with explicit host policy.",
                     )
             else:
-                access = await asyncio.to_thread(
+                access = await wait_workerbee_thread(
                     request.app.state.workerbee_access_policy.get_profile,
                     agent_id,
                     selected_backend=runtime.backend,
@@ -1033,7 +1049,7 @@ def register_workerbee_routes(
                     "WORKERBEE_TRUSTED_DIRECT_BIND_RECEIPT_UNEXPECTED",
                     "Trusted-direct receipt identity is valid only for trusted-direct-bind.",
                 )
-            include_paths = await asyncio.to_thread(
+            include_paths = await wait_workerbee_thread(
                 request.app.state.workerbee_snapshot_policy.resolve_include_paths,
                 agent_id=agent_id,
                 source_root=cwd,
@@ -1047,7 +1063,7 @@ def register_workerbee_routes(
                     "Requested appliance include paths exceed the effective host policy.",
                     "Approve the paths through WorkerBee appliance-content policy first.",
                 )
-            path_policy = await asyncio.to_thread(
+            path_policy = await wait_workerbee_thread(
                 request.app.state.workerbee_workspace_policy.resolve_path_domain,
                 agent_id=agent_id,
                 source_root=cwd,
@@ -1073,7 +1089,7 @@ def register_workerbee_routes(
                         "Review and persist the current WorkerBee policy before "
                         "preparing a workspace.",
                     )
-            binding = await asyncio.to_thread(
+            binding = await wait_workerbee_thread(
                 request.app.state.workerbee_workspaces.prepare,
                 runtime=runtime,
                 project=project,
@@ -1101,6 +1117,7 @@ def register_workerbee_routes(
         response_model=dict[str, Any],
         dependencies=[Depends(require_controller)],
     )
+    @admitted("issue_workerbee_gateway_lease", discover=True)
     async def issue_workerbee_gateway_lease(
         agent_id: str,
         payload: WorkerBeeGatewayLeaseRequest,
@@ -1108,7 +1125,7 @@ def register_workerbee_routes(
         store: Any = Depends(get_store),
     ) -> dict[str, Any]:
         agent = store.get_agent(agent_id)
-        await asyncio.to_thread(workerbee_application.refresh_runtime_selection)
+        await wait_workerbee_thread(workerbee_application.refresh_runtime_selection)
         try:
             runtime = request.app.state.workerbee_runtime.selected()
             if runtime is None:
@@ -1126,7 +1143,7 @@ def register_workerbee_routes(
                         "Pre-registration launch candidates are limited to read-only WorkerBee profiles.",
                     )
             else:
-                access = await asyncio.to_thread(
+                access = await wait_workerbee_thread(
                     request.app.state.workerbee_access_policy.get_profile,
                     agent_id,
                     selected_backend=runtime.backend,
@@ -1138,11 +1155,11 @@ def register_workerbee_routes(
                         "Requested lease profile does not match the Agent's effective access policy.",
                         f"Request {effective_profile!r} or update the policy within its administrator ceiling.",
                     )
-                requested_binding = await asyncio.to_thread(
+                requested_binding = await wait_workerbee_thread(
                     request.app.state.workerbee_workspaces.load,
                     payload.workspace_binding_id,
                 )
-                path_policy = await asyncio.to_thread(
+                path_policy = await wait_workerbee_thread(
                     request.app.state.workerbee_workspace_policy.resolve_path_domain,
                     agent_id=agent_id,
                     source_root=requested_binding.source_root,
@@ -1177,7 +1194,7 @@ def register_workerbee_routes(
                         "Durable WorkerBee profile authority no longer matches workspace policy.",
                         "Review and persist the current WorkerBee policy before issuing a lease.",
                     )
-            lease, token = await asyncio.to_thread(
+            lease, token = await wait_workerbee_thread(
                 request.app.state.workerbee_gateway.issue,
                 agent_id=agent_id,
                 codex_session_id=payload.codex_session_id,
@@ -1194,12 +1211,12 @@ def register_workerbee_routes(
             raise HTTPException(status_code=409, detail=exc.public_dict()) from exc
         binding = None
         if agent is not None:
-            binding = await asyncio.to_thread(
+            binding = await wait_workerbee_thread(
                 request.app.state.workerbee_workspaces.load,
                 lease.workspace_binding_id,
             )
         try:
-            await asyncio.to_thread(
+            await wait_workerbee_thread(
                 finalize_issued_workerbee_lease,
                 store,
                 request.app.state.workerbee_gateway,
@@ -1223,6 +1240,7 @@ def register_workerbee_routes(
         response_model=dict[str, Any],
         dependencies=[Depends(require_controller)],
     )
+    @admitted("revoke_workerbee_gateway_lease")
     async def revoke_workerbee_gateway_lease(
         agent_id: str,
         lease_id: str,
@@ -1231,80 +1249,18 @@ def register_workerbee_routes(
     ) -> dict[str, Any]:
         require_agent(store, agent_id)
         try:
-            lease = await asyncio.to_thread(
+            lease = await wait_workerbee_thread(
                 request.app.state.workerbee_gateway.load, lease_id
             )
             if lease.agent_id != agent_id:
                 raise HTTPException(status_code=404, detail="WorkerBee lease not found")
-            revoked = await asyncio.to_thread(
+            revoked = await wait_workerbee_thread(
                 request.app.state.workerbee_gateway.revoke, lease_id
             )
         except WorkerBeeGatewayError as exc:
             raise HTTPException(status_code=404, detail=exc.public_dict()) from exc
         return revoked.public_dict()
 
-    @app.get(
-        "/v1/workerbee/switch",
-        response_model=dict[str, Any],
-        dependencies=[Depends(require_token)],
-    )
-    async def workerbee_switch_status(request: Request) -> dict[str, Any]:
-        return await asyncio.to_thread(request.app.state.workerbee_switcher.status)
-
-    @app.post(
-        "/v1/workerbee/switch/preview",
-        response_model=dict[str, Any],
-        dependencies=[Depends(require_controller)],
-    )
-    async def preview_workerbee_switch(
-        payload: WorkerBeeSwitchPreviewRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        try:
-            return await asyncio.to_thread(
-                request.app.state.workerbee_switcher.preview,
-                payload.target,
-            )
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    @app.post(
-        "/v1/workerbee/switch/apply",
-        response_model=dict[str, Any],
-        dependencies=[Depends(require_controller)],
-    )
-    async def apply_workerbee_switch(
-        payload: WorkerBeeSwitchApplyRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        try:
-            return await asyncio.to_thread(
-                request.app.state.workerbee_switcher.apply,
-                payload.transaction_id,
-                preview_token=payload.preview_token,
-                confirm_target=payload.confirm_target,
-                confirm_privileged=payload.confirm_privileged,
-            )
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    @app.post(
-        "/v1/workerbee/switch/rollback",
-        response_model=dict[str, Any],
-        dependencies=[Depends(require_controller)],
-    )
-    async def rollback_workerbee_switch(
-        payload: WorkerBeeSwitchRollbackRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        try:
-            return await asyncio.to_thread(
-                request.app.state.workerbee_switcher.rollback,
-                payload.transaction_id,
-                confirm=payload.confirm,
-            )
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 __all__ = ("register_workerbee_routes",)

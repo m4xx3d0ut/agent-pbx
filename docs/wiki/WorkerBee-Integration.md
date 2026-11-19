@@ -40,6 +40,38 @@ visibility mismatch. Do not patch the WorkerBee server merely because a launch
 allowlist omitted `workerbee_v1_session_start`. Correct the policy or path
 mapping first.
 
+## Durable selector cutover
+
+The daemon holds exclusive ownership of its private WorkerBee selector state.
+On first start, it imports an exact valid legacy selection, preserving the
+instance and generation. The original selection file remains as migration
+evidence. Subsequent selection and recovery use the transactional SQLite state.
+The existing application database schema stays at its current version.
+
+A global controller previews the change against the current generation and
+the adapter's artifact, effective configuration, route, and transport evidence.
+The daemon closes admission and drains catalog queries, tool calls, workspace
+and lease changes, and controlled runs before invoking the adapter. Successful
+publication advances the generation together with the journal entry. An exact
+no-op preserves it. A verified rollback advances it again, so older leases
+cannot regain access even if the endpoint and backend return to their prior
+values. An explicit session rebind is necessary before continued use.
+
+The legacy adapter can discover a backend and support existing bindings. An
+effectful cutover requires a separately qualified host adapter. Its verification
+must match the reviewed package or image, route, effective configuration, and
+transport. Application-level transport metadata is checked on the connection
+to the admitted endpoint. The qualified host adapter must also establish that
+the route reliably binds that endpoint to the intended backend instance.
+
+After an interruption, the controller either reopens the unchanged source
+after exact readback, resumes a read-only verification, or finalizes a verified
+publication without advancing it twice. Ambiguous adapter effects or orphaned
+operations keep admission closed for reconciliation. Local status remains
+readable. Preserve the journal and the active backend evidence for review.
+Deleting selector state or restoring the legacy selection file could reuse an
+old generation and would invalidate the lease isolation guarantee.
+
 ## Choose a workflow posture
 
 Agent PBX 2.3.0 keeps four runtime-authority axes independent:

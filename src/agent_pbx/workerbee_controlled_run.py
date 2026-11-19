@@ -546,6 +546,51 @@ class WorkerBeeControlledRunService:
         )
         return {"request": request, "created": created, "preflight": preflight}
 
+    def revalidate_start(self, request: Mapping[str, Any]) -> None:
+        """Recheck the persisted approval against current local run authority."""
+        if (
+            request.get("status") not in {"approved", "claimed", "provisioning"}
+            or request.get("approved_at") is None
+            or float(request.get("expires_at") or 0) <= now_ts()
+        ):
+            raise WorkerBeeControlledRunError(
+                "WORKERBEE_CONTROLLED_RUN_APPROVAL_STALE",
+                "The exact controlled-run approval is no longer current.",
+            )
+        current = self.preflight(
+            root_operator_agent_id=request["root_operator_agent_id"],
+            target_fork_agent_id=request["target_fork_agent_id"],
+            campaign_id=request["campaign_id"],
+            profile_id=request["profile_id"],
+            baseline_commit=request["baseline_commit"],
+            candidate_commit=request["candidate_commit"],
+        )
+        scope = (
+            "root_operator_agent_id", "target_fork_agent_id", "campaign_id", "workspace_set_digest",
+            "backend", "backend_instance_id", "backend_fingerprint", "backend_generation",
+            "workspace_binding_id", "profile_id", "profile_sha256", "baseline_commit",
+            "candidate_commit", "recipe_id", "tool_manifest_sha256", "request_sha256",
+        )
+        if any(request.get(key) != current[key] for key in (*scope, "profile_version", "profile")):
+            raise WorkerBeeControlledRunError(
+                "WORKERBEE_CONTROLLED_RUN_APPROVAL_DRIFT",
+                "The approved controlled-run identity or workspace no longer matches policy.",
+            )
+        lease_id = request.get("lease_id")
+        if lease_id:
+            lease = self.store.get_workerbee_controlled_run_lease(lease_id)
+            if (
+                lease is None or lease.get("expired") or lease.get("revoked_at") is not None
+                or lease.get("status") not in {"approved", "exhausted"}
+                or not 0 < lease["use_count"] <= lease["max_uses"]
+                or request.get("decided_by") != f"lease:{lease_id}"
+                or any(lease.get(key) != request.get(key) for key in scope)
+            ):
+                raise WorkerBeeControlledRunError(
+                    "WORKERBEE_CONTROLLED_RUN_LEASE_STALE",
+                    "The consumed lease no longer covers this exact approved request.",
+                )
+
     def impact(self) -> dict[str, Any]:
         """Return bounded active-run evidence used to guard backend switches."""
 

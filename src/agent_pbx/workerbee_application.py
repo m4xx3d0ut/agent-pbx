@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +11,7 @@ from .workerbee_access import (
     WorkerBeeAccessPolicyError,
     WorkerBeeAccessPolicyService,
 )
+from .workerbee_cutover import wait_workerbee_thread
 from .workerbee_gateway import (
     WorkerBeeGatewayError,
     WorkerBeeGatewayService,
@@ -20,7 +20,7 @@ from .workerbee_policy import WorkerBeeWorkspacePolicyService
 from .workerbee_projection import (
     WorkerBeeBindingProjectionService,
     durable_workerbee_profile,
-    finalize_issued_workerbee_lease,
+    finalize_issued_workerbee_lease as finalize_issued_workerbee_lease,
     reconcile_workerbee_gateway_startup,
 )
 from .workerbee_runtime import WorkerBeeRuntimeRegistry
@@ -67,27 +67,14 @@ class WorkerBeeApplicationService:
         self._switcher = switcher
         self._call_mcp_tool = call_mcp_tool
 
-    @staticmethod
-    def durable_profile(metadata: Mapping[str, Any]) -> str:
-        return durable_workerbee_profile(metadata)
+    durable_profile = staticmethod(durable_workerbee_profile)
 
     def reconcile_gateway_startup(self) -> dict[str, Any]:
         return reconcile_workerbee_gateway_startup(self.store, self._gateway())
 
     def refresh_runtime_selection(self) -> dict[str, Any]:
-        switch_status = self._switcher().status()
-        active = (
-            switch_status.get("active")
-            if isinstance(switch_status.get("active"), dict)
-            else {}
-        )
         runtime = self._runtime_registry()
-        if (
-            active.get("ready")
-            and str(active.get("backend") or "").strip()
-            and str(active.get("endpoint") or "").strip()
-        ):
-            runtime.observe(active, reason="selector_status")
+        switch_status = runtime.observe_status(self._switcher().status)
         posture = runtime.posture()
         posture["selector"] = switch_status
         posture["gateway_impact"] = self._gateway().impact()
@@ -187,14 +174,16 @@ class WorkerBeeApplicationService:
         self,
         agent: dict[str, Any],
     ) -> dict[str, Any]:
-        posture = await asyncio.to_thread(self.refresh_runtime_selection)
-        selected = (
-            posture.get("selected")
-            if isinstance(posture.get("selected"), dict)
-            else None
-        )
+        await wait_workerbee_thread(self.refresh_runtime_selection)
+        with self._runtime_registry().admission("selected_status", require_runtime=False):
+            runtime = self._runtime_registry().selected()
+            return await self._selected_status(agent, runtime.public_dict() if runtime else None)
+
+    async def _selected_status(
+        self, agent: dict[str, Any], selected: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         if selected is None or selected.get("backend") == "oss":
-            result = await asyncio.to_thread(
+            result = await wait_workerbee_thread(
                 self._status_service().status_for_agent,
                 agent,
             )
@@ -220,7 +209,7 @@ class WorkerBeeApplicationService:
         lease_error: WorkerBeeGatewayError | None = None
         if lease_id:
             try:
-                lease, selected_binding = await asyncio.to_thread(
+                lease, selected_binding = await wait_workerbee_thread(
                     self._gateway().current_binding,
                     lease_id,
                 )
@@ -272,7 +261,7 @@ class WorkerBeeApplicationService:
             }
             return base
         try:
-            binding = selected_binding or await asyncio.to_thread(
+            binding = selected_binding or await wait_workerbee_thread(
                 self._workspace_service().load,
                 binding_id,
             )
@@ -282,7 +271,7 @@ class WorkerBeeApplicationService:
                     "WORKERBEE_RUNTIME_UNSELECTED",
                     "No verified WorkerBee runtime is selected.",
                 )
-            await asyncio.to_thread(
+            await wait_workerbee_thread(
                 self._workspace_service().verify_runtime,
                 binding,
                 runtime,

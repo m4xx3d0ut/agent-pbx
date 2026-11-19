@@ -600,7 +600,8 @@ def test_workerbee_switch_api_preserves_preview_apply_boundary(tmp_path: Path) -
         def status(self):  # type: ignore[no-untyped-def]
             return {"available": True}
 
-        def preview(self, target):  # type: ignore[no-untyped-def]
+        def preview(self, target, *, controller):  # type: ignore[no-untyped-def]
+            assert controller == "local"
             calls.append(("preview", target))
             return {"transaction_id": "a" * 24, "preview_token": "p" * 24}
 

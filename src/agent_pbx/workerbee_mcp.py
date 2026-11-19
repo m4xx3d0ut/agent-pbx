@@ -10,9 +10,18 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+from .workerbee_cutover import WorkerBeeCutoverError, current_workerbee_operation
+
+
+def pinned_workerbee_http_client(headers=None, timeout=None, auth=None):
+    """Connect directly to the admitted URL with redirects and proxy inheritance off."""
+    return httpx.AsyncClient(
+        headers=headers, timeout=timeout, auth=auth, trust_env=False, follow_redirects=False,
+    )
 
 WORKERBEE_REQUIRED_BOOTSTRAP_TOOLS = (
     "workerbee_v1_capabilities",
@@ -407,9 +416,17 @@ async def call_workerbee_mcp_tool(
     """Call one selected WorkerBee MCP tool and normalize its structured payload."""
 
     async def invoke() -> dict[str, Any]:
-        async with streamablehttp_client(endpoint) as (read, write, _):
+        ticket = current_workerbee_operation()
+        if ticket is not None and (ticket.runtime is None or endpoint != ticket.runtime.endpoint):
+            raise WorkerBeeCutoverError(
+                "WORKERBEE_TRANSPORT_DRIFT", "Endpoint differs from the admitted selection",
+            )
+        transport = {"httpx_client_factory": pinned_workerbee_http_client} if ticket else {}
+        async with streamablehttp_client(endpoint, **transport) as (read, write, _):
             async with ClientSession(read, write) as session:
-                await session.initialize()
+                identity = await session.initialize()
+                if ticket is not None:
+                    ticket.verify_connection(identity)
                 result = await session.call_tool(tool_name, dict(arguments or {}))
                 if bool(getattr(result, "isError", False)) or bool(
                     getattr(result, "is_error", False)

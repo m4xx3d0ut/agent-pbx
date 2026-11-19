@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import importlib.util
 import json
 import subprocess
@@ -368,7 +367,20 @@ def test_typed_service_container_preserves_legacy_state_and_route_owner(
         if getattr(getattr(route, "endpoint", None), "__module__", "")
         == "agent_pbx.api_routes.workerbee"
     ]
-    assert len(workerbee_routes) == 38
+    assert len(workerbee_routes) == 34
+    workerbee_cutover_routes = {
+        (method, route.path)
+        for route in app.routes
+        if getattr(getattr(route, "endpoint", None), "__module__", "")
+        == "agent_pbx.api_routes.workerbee_cutover"
+        for method in route.methods
+    }
+    assert workerbee_cutover_routes == {
+        ("GET", "/v1/workerbee/switch"),
+        ("POST", "/v1/workerbee/switch/preview"),
+        ("POST", "/v1/workerbee/switch/apply"),
+        ("POST", "/v1/workerbee/switch/rollback"),
+    }
     operator_routes = [
         route
         for route in app.routes

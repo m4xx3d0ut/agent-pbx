@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -11,6 +12,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import timedelta
+from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any, AsyncIterator, Callable, Mapping
 
@@ -23,11 +25,13 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .security import constant_time_equal, generate_token, hash_secret
+from .workerbee_cutover import WorkerBeeCutoverError, wait_workerbee_thread
 from .workerbee_runtime import (
     WORKERBEE_WORKSPACE_DIRECT_HOST,
     WorkerBeeRuntimeRegistry,
     WorkerBeeRuntimeSelection,
 )
+from .workerbee_mcp import pinned_workerbee_http_client
 from .workerbee_policy import (
     WORKERBEE_WORKSPACE_REQUEST_APPROVAL,
     WorkerBeeWorkspacePolicyError,
@@ -116,7 +120,7 @@ WORKERBEE_PROJECT_SCOPED_TOOLS = frozenset(
     }
 )
 _LEASE_ID = re.compile(r"^[a-f0-9]{32}$")
-_CURRENT_LEASE_ID: ContextVar[str | None] = ContextVar(
+_CURRENT_LEASE: ContextVar[WorkerBeeGatewayLease | None] = ContextVar(
     "agent_pbx_workerbee_gateway_lease", default=None
 )
 
@@ -195,6 +199,16 @@ def _atomic_private_json(path: Path, payload: Mapping[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _gated(kind: str):
+    def decorate(method):
+        @wraps(method)
+        def guarded(self, *args, **kwargs):
+            with self.runtime_registry.admission(kind):
+                return method(self, *args, **kwargs)
+        return guarded
+    return decorate
+
+
 class WorkerBeeGatewayService:
     """Bind one Codex session to one selected backend generation and workspace."""
 
@@ -230,6 +244,7 @@ class WorkerBeeGatewayService:
         self._mutation_lock = threading.Lock()
         self._active_mutations: dict[str, int] = {}
 
+    @_gated("lease_issue")
     def issue(
         self,
         *,
@@ -447,6 +462,7 @@ class WorkerBeeGatewayService:
         _runtime, binding = self._refresh_context(lease)
         return lease, binding
 
+    @_gated("lease_revoke")
     def revoke(self, lease_id: str) -> WorkerBeeGatewayLease:
         with self._lease_lock:
             lease = self.load(lease_id)
@@ -538,6 +554,29 @@ class WorkerBeeGatewayService:
             "active_leases": leases,
             "active_mutations": mutations,
             "mutation_count": sum(mutations.values()),
+        }
+
+    def switch_impact(self, controlled: Mapping[str, Any]) -> dict[str, Any]:
+        """Build the preview inventory from durable bindings and effective policy."""
+        gateway = self.impact()
+        leases = gateway["active_leases"]
+        policy = []
+        if self.workspace_policy is not None:
+            policy.append(self.workspace_policy.get_policy())
+            policy.extend(
+                self.workspace_policy.get_policy(lease["agent_id"])
+                for lease in leases
+            )
+        return {
+            "api_version": "agent-pbx.workerbee-switch-impact/v1",
+            "active_leases": leases,
+            "active_mutations": gateway["active_mutations"],
+            "active_controlled_runs": controlled["active_controlled_runs"],
+            "mutation_count": gateway["mutation_count"] + controlled["mutation_count"],
+            "workspace_bindings": self.workspace_service.cutover_inventory_digest(),
+            "workspace_policy": hashlib.sha256(json.dumps(
+                policy, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest(),
         }
 
     def prepare_arguments(
@@ -657,6 +696,7 @@ class WorkerBeeGatewayService:
             )
         return tuple(surface.effective_tools)
 
+    @_gated("workspace_transition")
     def transition_workspace(
         self,
         lease: WorkerBeeGatewayLease,
@@ -805,6 +845,7 @@ class WorkerBeeGatewayService:
         )
         return updated, next_binding, True
 
+    @_gated("workspace_transition")
     def apply_transition(
         self,
         transition_id: str,
@@ -847,6 +888,7 @@ class WorkerBeeGatewayService:
             transition_id=transition_id,
         )
 
+    @_gated("workspace_revert")
     def revert_transition(
         self,
         transition_id: str,
@@ -928,6 +970,7 @@ class WorkerBeeGatewayService:
         )
         return updated, previous
 
+    @_gated("workspace_refresh")
     def refresh_workspace(
         self,
         lease: WorkerBeeGatewayLease,
@@ -1274,23 +1317,48 @@ class WorkerBeeGatewayProxy:
         self.service = service
         self._lease_locks: dict[str, asyncio.Lock] = {}
 
+    @asynccontextmanager
+    async def _pin(self, lease: WorkerBeeGatewayLease, kind: str):
+        registry = self.service.runtime_registry
+        with registry.admission(
+            kind, lease_id=lease.lease_id, binding_id=lease.workspace_binding_id
+        ) as ticket:
+            current, _binding = await wait_workerbee_thread(
+                self.service.current_binding, lease.lease_id,
+            )
+            if current != lease:
+                raise WorkerBeeGatewayError(
+                    "WORKERBEE_CUTOVER_PIN_MISMATCH", "Lease or workspace changed before dispatch"
+                )
+            runtime = registry.selected()
+            if runtime is None:
+                raise WorkerBeeGatewayError(
+                    "WORKERBEE_RUNTIME_UNSELECTED", "No WorkerBee runtime is selected."
+                )
+            if ticket is not None:
+                registry.cutover.pin_workspace(
+                    current.lease_id, current.workspace_binding_id, current.path_domain_receipt_sha256,
+                )
+            yield current, runtime, ticket
+
     async def list_tools(self, lease: WorkerBeeGatewayLease) -> list[types.Tool]:
-        runtime = self.service.runtime_registry.selected()
-        if runtime is None:
-            raise WorkerBeeGatewayError(
-                "WORKERBEE_RUNTIME_UNSELECTED", "No WorkerBee runtime is selected."
-            )
-        async with streamablehttp_client(runtime.endpoint) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.list_tools()
-        effective = set(
-            self.service.resolve_tool_surface(
-                lease,
-                [tool.name for tool in result.tools],
-            )
-        )
-        return [tool for tool in result.tools if tool.name in effective]
+        lock = self._lease_locks.setdefault(lease.lease_id, asyncio.Lock())
+        async with lock:
+            async with self._pin(lease, "gateway_catalog") as (current, runtime, ticket):
+                transport = {"httpx_client_factory": pinned_workerbee_http_client} if ticket else {}
+                async with streamablehttp_client(runtime.endpoint, **transport) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        identity = await session.initialize()
+                        if ticket:
+                            ticket.verify_connection(identity)
+                            ticket.dispatch()
+                        result = await session.list_tools()
+                        if ticket:
+                            ticket.terminal()
+                effective = set(self.service.resolve_tool_surface(
+                    current, [tool.name for tool in result.tools]
+                ))
+                return [tool for tool in result.tools if tool.name in effective]
 
     async def call_tool(
         self,
@@ -1300,40 +1368,38 @@ class WorkerBeeGatewayProxy:
     ) -> types.CallToolResult:
         lock = self._lease_locks.setdefault(lease.lease_id, asyncio.Lock())
         async with lock:
-            current = self.service.load(lease.lease_id)
-            # Validate tool and project scope before doing any staging work.
-            self.service.prepare_arguments(current, tool_name, arguments)
-            async with self.service.mutation(current, tool_name):
-                if tool_name == "workerbee_v1_session_start":
-                    current, _binding, _changed = await asyncio.to_thread(
-                        self.service.transition_workspace,
-                        current,
-                        arguments,
-                    )
-                elif tool_name in WORKERBEE_MUTATING_TOOLS:
-                    await asyncio.to_thread(
-                        self.service.require_current_workspace,
-                        current,
-                    )
-                prepared = self.service.prepare_arguments(
-                    current,
-                    tool_name,
-                    arguments,
-                )
-                runtime = self.service.runtime_registry.selected()
-                if runtime is None:
-                    raise WorkerBeeGatewayError(
-                        "WORKERBEE_RUNTIME_UNSELECTED",
-                        "No WorkerBee runtime is selected.",
-                    )
-                async with streamablehttp_client(runtime.endpoint) as (read, write, _):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        return await session.call_tool(
-                            tool_name,
-                            prepared,
-                            read_timeout_seconds=timedelta(seconds=300),
+            async with self._pin(lease, "gateway_call") as (current, runtime, ticket):
+                self.service.prepare_arguments(current, tool_name, arguments)
+                async with self.service.mutation(current, tool_name):
+                    if tool_name == "workerbee_v1_session_start":
+                        prior_binding_id = current.workspace_binding_id
+                        current, _binding, _changed = await wait_workerbee_thread(
+                            self.service.transition_workspace, current, arguments,
                         )
+                        if ticket is not None:
+                            self.service.runtime_registry.cutover.pin_workspace(
+                                current.lease_id, current.workspace_binding_id,
+                                current.path_domain_receipt_sha256,
+                                replacing_binding_id=prior_binding_id,
+                            )
+                    elif tool_name in WORKERBEE_MUTATING_TOOLS:
+                        await wait_workerbee_thread(self.service.require_current_workspace, current)
+                    prepared = self.service.prepare_arguments(current, tool_name, arguments)
+                    transport = {"httpx_client_factory": pinned_workerbee_http_client} if ticket else {}
+                    async with streamablehttp_client(runtime.endpoint, **transport) as (read, write, _):
+                        async with ClientSession(read, write) as session:
+                            identity = await session.initialize()
+                            if ticket:
+                                ticket.verify_connection(identity)
+                                ticket.dispatch()
+                            result = await session.call_tool(
+                                tool_name,
+                                prepared,
+                                read_timeout_seconds=timedelta(seconds=300),
+                            )
+                            if ticket:
+                                ticket.terminal()
+                            return result
 
 
 class WorkerBeeGatewayAuthMiddleware:
@@ -1348,9 +1414,14 @@ class WorkerBeeGatewayAuthMiddleware:
         lease_id = self._route_lease_id(scope)
         token = self._bearer_token(scope)
         try:
-            self.service.validate(lease_id, token or "")
-        except WorkerBeeGatewayError as exc:
-            status = 409 if exc.code == "WORKERBEE_BACKEND_REBIND_REQUIRED" else 403
+            with self.service.runtime_registry.admission(
+                "gateway_auth", lease_id=lease_id, require_runtime=False
+            ):
+                lease = await wait_workerbee_thread(self.service.validate, lease_id, token or "")
+        except (WorkerBeeGatewayError, WorkerBeeCutoverError) as exc:
+            status = 409 if isinstance(exc, WorkerBeeCutoverError) or (
+                exc.code == "WORKERBEE_BACKEND_REBIND_REQUIRED"
+            ) else 403
             await JSONResponse(exc.public_dict(), status_code=status)(scope, receive, send)
             return
         rewritten = dict(scope)
@@ -1358,11 +1429,11 @@ class WorkerBeeGatewayAuthMiddleware:
         rewritten_path = f"{root_path}/" if root_path else "/"
         rewritten["path"] = rewritten_path
         rewritten["raw_path"] = rewritten_path.encode("utf-8")
-        context_token = _CURRENT_LEASE_ID.set(lease_id)
+        context_token = _CURRENT_LEASE.set(lease)
         try:
             await self.app(rewritten, receive, send)
         finally:
-            _CURRENT_LEASE_ID.reset(context_token)
+            _CURRENT_LEASE.reset(context_token)
 
     @staticmethod
     def _route_lease_id(scope: Scope) -> str:
@@ -1406,13 +1477,13 @@ def create_workerbee_gateway_app(
     )
 
     def current_lease() -> WorkerBeeGatewayLease:
-        lease_id = _CURRENT_LEASE_ID.get()
-        if not lease_id:
+        lease = _CURRENT_LEASE.get()
+        if lease is None:
             raise WorkerBeeGatewayError(
                 "WORKERBEE_GATEWAY_CONTEXT_MISSING",
                 "WorkerBee gateway request has no session lease context.",
             )
-        return service.load(lease_id)
+        return lease
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:

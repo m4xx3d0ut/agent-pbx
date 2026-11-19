@@ -36,6 +36,7 @@ from agent_pbx.workerbee_modes import (
     WORKERBEE_K1S_PROFILE_EVIDENCE_OPERATIONS,
     WORKERBEE_TOOL_K1S_PROFILE_EVIDENCE,
 )
+from agent_pbx.workerbee_cutover import WorkerBeeCutoverError
 from agent_pbx.workerbee_runtime import WorkerBeeRuntimeRegistry
 from agent_pbx.workerbee_policy import WorkerBeeWorkspacePolicyService
 from agent_pbx.workerbee_workspace import WorkerBeeWorkspaceService
@@ -341,7 +342,8 @@ def test_app_startup_repairs_historical_active_gateway_duplicates(
     repo = tmp_path / "repo"
     git_repo(repo)
     app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
-    selected = app.state.workerbee_runtime.observe(
+    legacy_runtime = WorkerBeeRuntimeRegistry(app.state.workerbee_runtime.state_root)
+    selected = legacy_runtime.observe(
         {
             "backend": "oss",
             "endpoint": "http://127.0.0.1:8765/mcp",
@@ -361,13 +363,16 @@ def test_app_startup_repairs_historical_active_gateway_duplicates(
             metadata={"cwd": str(repo)},
         )
     )
-    predecessor, _predecessor_token = app.state.workerbee_gateway.issue(
+    legacy_gateway = WorkerBeeGatewayService(
+        app.state.workerbee_gateway.state_root, legacy_runtime, app.state.workerbee_workspaces,
+    )
+    predecessor, _predecessor_token = legacy_gateway.issue(
         agent_id="demo-agent",
         codex_session_id="thread-1",
         profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
         workspace_binding_id=binding.binding_id,
     )
-    current, _current_token = app.state.workerbee_gateway.issue(
+    current, _current_token = legacy_gateway.issue(
         agent_id="demo-agent",
         codex_session_id="thread-2",
         profile=WORKERBEE_PROFILE_LOCAL_DEPLOY,
@@ -727,11 +732,14 @@ async def test_gateway_auth_resolves_mounted_lease_path_and_rewrites_transport_r
     path: str,
     root_path: str,
     expected_rewritten: str,
+    tmp_path: Path,
 ) -> None:
     validated: list[tuple[str, str]] = []
     downstream_scopes: list[dict[str, object]] = []
 
     class Service:
+        runtime_registry = WorkerBeeRuntimeRegistry(tmp_path / "runtime")
+
         @staticmethod
         def validate(lease_id: str, token: str) -> None:
             validated.append((lease_id, token))
@@ -1582,7 +1590,8 @@ def test_gateway_api_admits_fully_configured_trusted_direct_bind(
             return {"active": active}
 
     app.state.workerbee_switcher = Selector()
-    selected = app.state.workerbee_runtime.observe(active)
+    legacy = WorkerBeeRuntimeRegistry(app.state.workerbee_runtime.state_root)
+    selected = legacy.observe(active)
     receipt_id, receipt_sha256, runner = trusted_direct_api_receipt(
         source=repo,
         selected=selected,
@@ -1928,7 +1937,8 @@ def test_gateway_api_requires_explicit_access_profile_and_restart(tmp_path: Path
     repo = tmp_path / "repo"
     git_repo(repo)
     app = create_app(ServerConfig(db_path=tmp_path / "pbx.sqlite"))
-    app.state.workerbee_runtime.observe(
+    legacy = WorkerBeeRuntimeRegistry(app.state.workerbee_runtime.state_root)
+    legacy.observe(
         {
             "backend": "oss",
             "endpoint": "http://127.0.0.1:8765/mcp",
@@ -2007,25 +2017,19 @@ def test_gateway_api_requires_explicit_access_profile_and_restart(tmp_path: Path
             "WORKERBEE_CONTROLLED_RUN_AUTHORITY_SEPARATE"
         )
 
-        app.state.workerbee_runtime.observe(
-            {
-                "backend": "platform_debug",
-                "endpoint": "http://127.0.0.1:9876/mcp",
-                "server_name": "WorkerBee Platform Debug",
-                "server_version": "2.3.0rc2",
-            }
-        )
-        platform_readback = client.get(
-            "/v2/agents/demo-agent/workerbee/access-profile"
-        )
-        assert platform_readback.status_code == 200
-        assert platform_readback.json()["selected_backend"] == "platform_debug"
-        assert platform_readback.json()["tool_surface_contract"][
-            "reviewed_optional_tools"
-        ] == [
-            *catalog_fixture["platform_debug_paas_control_plane_tools"],
-            *catalog_fixture["platform_debug_reviewed_optional_tools"],
-        ]
+        with pytest.raises(WorkerBeeCutoverError, match="differs from committed selection"):
+            app.state.workerbee_runtime.observe(
+                {
+                    "backend": "platform_debug",
+                    "endpoint": "http://127.0.0.1:9876/mcp",
+                    "server_name": "WorkerBee Platform Debug",
+                    "server_version": "2.3.0rc2",
+                }
+            )
+        readback = client.get("/v2/agents/demo-agent/workerbee/access-profile")
+        assert readback.status_code == 200
+        assert readback.json()["selected_backend"] == "oss"
+        assert app.state.workerbee_runtime.cutover.posture()["admission"] == "recovery_required"
 
 
 @pytest.mark.parametrize(

@@ -253,7 +253,7 @@ def create_app(
         timeout_seconds=resolved_config.workerbee_timeout_seconds,
         cache_seconds=resolved_config.workerbee_cache_seconds,
     )
-    workerbee_runtime = WorkerBeeRuntimeRegistry(workerbee_state_root)
+    workerbee_runtime = WorkerBeeRuntimeRegistry.for_daemon(workerbee_state_root)
     workerbee_workspaces = WorkerBeeWorkspaceService(
         workerbee_state_root / "workspaces",
         helper_bin=resolved_config.workerbee_trusted_direct_helper_bin,
@@ -312,33 +312,21 @@ def create_app(
     )
     workerbee_gateway_app = create_workerbee_gateway_app(workerbee_gateway)
 
-    def workerbee_switch_impact() -> dict[str, Any]:
-        gateway_impact = workerbee_gateway.impact()
-        controlled_impact = workerbee_controlled_runs.impact()
-        return {
-            "api_version": "agent-pbx.workerbee-switch-impact/v1",
-            "active_leases": list(gateway_impact.get("active_leases") or []),
-            "active_mutations": dict(gateway_impact.get("active_mutations") or {}),
-            "active_controlled_runs": list(
-                controlled_impact.get("active_controlled_runs") or []
-            ),
-            "mutation_count": int(gateway_impact.get("mutation_count") or 0)
-            + int(controlled_impact.get("mutation_count") or 0),
-        }
-
     workerbee_switcher = WorkerBeeSwitchService(
         state_root=resolved_config.db_path.parent / "workerbee-switch",
         cache_invalidator=workerbee.clear_cache,
-        impact_provider=workerbee_switch_impact,
-        selection_recorder=workerbee_runtime.observe,
+        impact_provider=lambda: workerbee_gateway.switch_impact(workerbee_controlled_runs.impact()),
+        cutover=workerbee_runtime.cutover,
     )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         async with AsyncExitStack() as stack:
+            await stack.enter_async_context(workerbee_switcher.controller_lifespan())
             await stack.enter_async_context(mcp_server.session_manager.run())
             await stack.enter_async_context(workerbee_gateway_app.session_manager.run())
-            await asyncio.to_thread(app.state.workerbee_application.reconcile_gateway_startup)
+            if workerbee_switcher.admission_open:
+                await asyncio.to_thread(app.state.workerbee_application.reconcile_gateway_startup)
             smoke_task: asyncio.Task[None] | None = None
             joplin_sync_task: asyncio.Task[None] | None = None
             if resolved_config.debug_smoke:
@@ -362,7 +350,8 @@ def create_app(
                     name="agent-pbx-joplin-sync",
                 )
             await app.state.codex_event_bridge.start()
-            await app.state.workerbee_controlled_run_executor.start()
+            if workerbee_switcher.admission_open:
+                await app.state.workerbee_controlled_run_executor.start()
             try:
                 yield
             finally:

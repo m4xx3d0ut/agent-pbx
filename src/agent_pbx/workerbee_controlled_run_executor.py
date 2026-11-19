@@ -16,6 +16,12 @@ from .workerbee_controlled_run import (
     WorkerBeeControlledRunService,
 )
 from .workerbee_mcp import call_workerbee_mcp_tool
+from .workerbee_cutover import (
+    WorkerBeeCutoverDraining,
+    WorkerBeeCutoverError,
+    current_workerbee_operation,
+    wait_workerbee_thread,
+)
 from .workerbee_runtime import WorkerBeeRuntimeRegistry
 
 
@@ -77,7 +83,7 @@ class WorkerBeeControlledRunExecutor:
 
     async def start(self) -> None:
         self._closing = False
-        requests = await asyncio.to_thread(
+        requests = await wait_workerbee_thread(
             self.store.list_workerbee_controlled_run_requests,
             statuses=(
                 "approved", "claimed", "provisioning", "canary", "running",
@@ -117,14 +123,20 @@ class WorkerBeeControlledRunExecutor:
     async def cancel(
         self, request_id: str, *, canceled_by: str, reason: str
     ) -> dict[str, Any]:
-        request = await asyncio.to_thread(
+        with self.runtime_registry.admission("controlled_run_cancel", require_runtime=False):
+            return await self._cancel(request_id, canceled_by=canceled_by, reason=reason)
+
+    async def _cancel(
+        self, request_id: str, *, canceled_by: str, reason: str
+    ) -> dict[str, Any]:
+        request = await wait_workerbee_thread(
             self.store.get_workerbee_controlled_run_request, request_id
         )
         if request is None:
             raise KeyError("WorkerBee controlled-run request not found")
         run_id = str(request.get("workerbee_run_id") or "")
         if not run_id:
-            return await asyncio.to_thread(
+            return await wait_workerbee_thread(
                 self.service.cancel,
                 request_id,
                 canceled_by=canceled_by,
@@ -137,36 +149,64 @@ class WorkerBeeControlledRunExecutor:
             {"run_id": run_id, "reason": str(reason)[:1000]},
         )
         self.schedule(request_id)
-        latest = await asyncio.to_thread(
+        latest = await wait_workerbee_thread(
             self.store.get_workerbee_controlled_run_request, request_id
         )
         assert latest is not None
         return latest
 
     async def _run_guarded(self, request_id: str) -> None:
-        try:
-            await self._run(request_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - persist normalized executor failure
-            await self._fail(request_id, exc)
-
-    async def _run(self, request_id: str) -> None:
-        request = await asyncio.to_thread(
-            self.store.get_workerbee_controlled_run_request, request_id
+        request = await wait_workerbee_thread(
+            self.store.get_workerbee_controlled_run_request, request_id,
         )
         if request is None:
+            return
+        approval = request if request["status"] == "approved" else None
+        cutover = self.runtime_registry.cutover
+        epoch = None
+        while not self._closing:
+            try:
+                with self.runtime_registry.admission(
+                    "controlled_run_execute", inherit=False,
+                    binding_id=str(request.get("workspace_binding_id") or ""),
+                    lease_id=str(request.get("lease_id") or ""),
+                    expected_epoch=epoch,
+                ) as ticket:
+                    try:
+                        if ticket and request.get("workerbee_run_id"):
+                            ticket.dispatch()
+                        await self._run(request_id, expected_approval=approval)
+                    except Exception as exc:  # noqa: BLE001 - persist normalized executor failure
+                        await self._fail(request_id, exc)
+                return
+            except WorkerBeeCutoverDraining as exc:
+                epoch = exc.epoch
+                if approval is None or cutover is None or not await cutover.wait_for_reopen(
+                    epoch=epoch, timeout=max(0.0, float(approval["expires_at"]) - now_ts()),
+                ):
+                    return
+            except WorkerBeeCutoverError:
+                return
+
+    async def _run(
+        self, request_id: str, *, expected_approval: Mapping[str, Any] | None = None,
+    ) -> None:
+        request = await wait_workerbee_thread(
+            self.store.get_workerbee_controlled_run_request, request_id
+        )
+        if request is None or (expected_approval is not None and request != expected_approval):
             return
         status = str(request.get("status") or "")
         if status in {
             "pending", "rejected", "expired", "succeeded", "failed", "canceled"
         }:
             return
+        runtime = self._require_runtime(request)
         if status in {
             "provisioning", "canary", "running", "collecting", "cleaning",
             "recovery_required",
         }:
-            request = await asyncio.to_thread(
+            request = await wait_workerbee_thread(
                 self.store.claim_workerbee_controlled_run_request,
                 request_id,
                 executor_id=self.executor_id,
@@ -184,7 +224,8 @@ class WorkerBeeControlledRunExecutor:
                 )
                 status = "running"
         if status in {"approved", "claimed"} and not request.get("workerbee_run_id"):
-            request = await asyncio.to_thread(
+            await self._revalidate_start(request)
+            request = await wait_workerbee_thread(
                 self.store.claim_workerbee_controlled_run_request,
                 request_id,
                 executor_id=self.executor_id,
@@ -196,7 +237,6 @@ class WorkerBeeControlledRunExecutor:
                 expected=("claimed",),
                 result={"phase": "appliance_preflight"},
             )
-            runtime = self._require_runtime(request)
             payload = self._request_payload(request)
             preflight = await self._call(
                 runtime.endpoint,
@@ -204,6 +244,15 @@ class WorkerBeeControlledRunExecutor:
                 payload,
             )
             self._validate_preflight(request, preflight)
+            current = await wait_workerbee_thread(
+                self.store.get_workerbee_controlled_run_request, request_id,
+            )
+            if current != request:
+                raise WorkerBeeControlledRunError(
+                    "WORKERBEE_CONTROLLED_RUN_APPROVAL_DRIFT",
+                    "The claimed controlled run changed during appliance preflight.",
+                )
+            await self._revalidate_start(request)
             request = await self._transition(
                 request,
                 "canary",
@@ -328,7 +377,7 @@ class WorkerBeeControlledRunExecutor:
             error=None if succeeded else "WorkerBee controlled run did not complete cleanly.",
         )
         evidence = receipt.get("evidence") if isinstance(receipt.get("evidence"), dict) else {}
-        await asyncio.to_thread(
+        await wait_workerbee_thread(
             self.store.record_workerbee_controlled_run_receipt,
             request_id,
             outcome=outcome,
@@ -340,6 +389,9 @@ class WorkerBeeControlledRunExecutor:
             evidence=self._bounded(evidence),
             cleanup=self._bounded(cleanup),
         )
+        ticket = current_workerbee_operation()
+        if ticket and cleanup_complete:
+            ticket.terminal()
 
     async def _transition(
         self,
@@ -353,7 +405,7 @@ class WorkerBeeControlledRunExecutor:
         error_code: str | None = None,
         error: str | None = None,
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(
+        return await wait_workerbee_thread(
             self.store.transition_workerbee_controlled_run_request,
             str(request["request_id"]),
             executor_id=self.executor_id,
@@ -385,6 +437,18 @@ class WorkerBeeControlledRunExecutor:
                 "The selected WorkerBee backend changed after approval.",
             )
         return runtime
+
+    async def _revalidate_start(self, request: Mapping[str, Any]) -> None:
+        ticket = current_workerbee_operation()
+        if ticket is not None and (
+            ticket.binding_id != request.get("workspace_binding_id")
+            or ticket.lease_id != (request.get("lease_id") or "")
+        ):
+            raise WorkerBeeControlledRunError(
+                "WORKERBEE_CONTROLLED_RUN_APPROVAL_DRIFT",
+                "The controlled run does not match the admitted workspace and lease.",
+            )
+        await wait_workerbee_thread(self.service.revalidate_start, request)
 
     @staticmethod
     def _request_payload(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -426,36 +490,51 @@ class WorkerBeeControlledRunExecutor:
     ) -> dict[str, Any]:
         if tool_name not in CONTROLLED_RUN_REQUIRED_TOOLS:
             raise RuntimeError("controlled-run executor attempted an unapproved tool")
-        return await self.tool_caller(
+        ticket = current_workerbee_operation()
+        effect = tool_name in {
+            "workerbee_v1_controlled_run_start", "workerbee_v1_controlled_run_cancel",
+        }
+        if ticket and tool_name in {
+            "workerbee_v1_controlled_run_preflight", "workerbee_v1_controlled_run_start",
+        }:
+            self.runtime_registry.cutover.authorize_dispatch(effect=effect)
+        elif ticket and effect:
+            ticket.dispatch()
+        result = await self.tool_caller(
             endpoint,
             tool_name,
             arguments,
             timeout_seconds=30.0,
         )
+        if ticket and effect and ticket.kind == "controlled_run_cancel":
+            ticket.terminal()
+        return result
 
     async def _fail(self, request_id: str, exc: Exception) -> None:
-        request = await asyncio.to_thread(
+        request = await wait_workerbee_thread(
             self.store.get_workerbee_controlled_run_request, request_id
         )
         if request is None or str(request.get("status")) in {
             "succeeded", "failed", "rejected", "canceled", "expired"
         }:
             return
-        error_code = (
-            exc.code
-            if isinstance(exc, WorkerBeeControlledRunError)
-            else "WORKERBEE_CONTROLLED_RUN_EXECUTOR_ERROR"
-        )
-        message = (
-            exc.message if isinstance(exc, WorkerBeeControlledRunError) else type(exc).__name__
+        known_error = isinstance(exc, (WorkerBeeControlledRunError, WorkerBeeCutoverError))
+        error_code = exc.code if known_error else "WORKERBEE_CONTROLLED_RUN_EXECUTOR_ERROR"
+        message = str(exc) if known_error else type(exc).__name__
+        ticket = current_workerbee_operation()
+        dispatch_refused_before_effect = (
+            error_code == "WORKERBEE_CUTOVER_DISPATCH_HELD"
+            and ticket is not None and not ticket.uncertain
         )
         current_status = str(request.get("status") or "")
-        may_have_started = bool(request.get("workerbee_run_id")) or current_status in {
-            "canary", "running", "collecting", "cleaning", "recovery_required"
-        }
+        may_have_started = bool(request.get("workerbee_run_id")) or (
+            not dispatch_refused_before_effect and current_status in {
+                "canary", "running", "collecting", "cleaning", "recovery_required",
+            }
+        )
         failure_status = "recovery_required" if may_have_started else "failed"
         with suppress(Exception):
-            await asyncio.to_thread(
+            await wait_workerbee_thread(
                 self.store.transition_workerbee_controlled_run_request,
                 request_id,
                 executor_id=str(request.get("executor_id") or self.executor_id),

@@ -896,9 +896,14 @@ def _workerbee_tool_surface_runtime_check(
 ) -> DoctorCheck:
     """Probe the selected backend catalog and expose effective/quarantine posture."""
 
-    selected = WorkerBeeRuntimeRegistry(
-        config.resolved_db_path.parent / "workerbee-runtime"
-    ).selected()
+    registry = WorkerBeeRuntimeRegistry(config.resolved_db_path.parent / "workerbee-runtime")
+    if registry.has_durable_selection:
+        return DoctorCheck(
+            "workerbee-tool-surface", "warn",
+            "the daemon owns admission to the WorkerBee tool catalog",
+            remediation="Use the daemon-managed gateway for current catalog diagnostics.",
+        )
+    selected = registry.selected()
     if selected is None:
         return DoctorCheck(
             "workerbee-tool-surface",

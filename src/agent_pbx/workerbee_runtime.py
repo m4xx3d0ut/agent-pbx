@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-import hashlib
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -10,63 +9,23 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
-
-WORKERBEE_RUNTIME_API_VERSION = "agent-pbx.workerbee-runtime/v1"
-WORKERBEE_BACKEND_OSS = "oss"
-WORKERBEE_BACKEND_USER_APPLIANCE = "user_appliance"
-WORKERBEE_BACKEND_PLATFORM_DEBUG = "platform_debug"
-WORKERBEE_BACKENDS = (
-    WORKERBEE_BACKEND_OSS,
-    WORKERBEE_BACKEND_USER_APPLIANCE,
-    WORKERBEE_BACKEND_PLATFORM_DEBUG,
+from .workerbee_cutover import DB_NAME, WorkerBeeCutover, WorkerBeeCutoverError, read_durable_selection
+from .workerbee_runtime_identity import (
+    _runtime_identity_fields,
+    WORKERBEE_RUNTIME_API_VERSION as WORKERBEE_RUNTIME_API_VERSION,
+    WORKERBEE_BACKENDS as WORKERBEE_BACKENDS,
+    WORKERBEE_BACKEND_OSS as WORKERBEE_BACKEND_OSS,
+    WORKERBEE_BACKEND_USER_APPLIANCE as WORKERBEE_BACKEND_USER_APPLIANCE,
+    WORKERBEE_BACKEND_PLATFORM_DEBUG as WORKERBEE_BACKEND_PLATFORM_DEBUG,
+    WORKERBEE_WORKSPACE_DIRECT_HOST as WORKERBEE_WORKSPACE_DIRECT_HOST,
+    WORKERBEE_WORKSPACE_MANAGED_APPLIANCE as WORKERBEE_WORKSPACE_MANAGED_APPLIANCE,
+    WORKERBEE_WORKSPACE_CONTENT_IMPORT as WORKERBEE_WORKSPACE_CONTENT_IMPORT,
+    WorkerBeeBackendDescriptor as WorkerBeeBackendDescriptor,
+    WorkerBeeRuntimeSelection as WorkerBeeRuntimeSelection,
+    canonical_workerbee_backend as canonical_workerbee_backend,
+    runtime_fingerprint as runtime_fingerprint,
+    workspace_strategy_for_backend as workspace_strategy_for_backend,
 )
-
-WORKERBEE_WORKSPACE_DIRECT_HOST = "direct_host"
-WORKERBEE_WORKSPACE_MANAGED_APPLIANCE = "managed_appliance_volume"
-WORKERBEE_WORKSPACE_CONTENT_IMPORT = "content_addressed_import"
-
-
-def canonical_workerbee_backend(value: object) -> str:
-    normalized = str(value or "").strip().lower().replace("-", "_")
-    aliases = {
-        "local": WORKERBEE_BACKEND_OSS,
-        "oss_local": WORKERBEE_BACKEND_OSS,
-        "workerbee_oss": WORKERBEE_BACKEND_OSS,
-        "user": WORKERBEE_BACKEND_USER_APPLIANCE,
-        "appliance": WORKERBEE_BACKEND_USER_APPLIANCE,
-        "user_facing": WORKERBEE_BACKEND_USER_APPLIANCE,
-        "debug": WORKERBEE_BACKEND_PLATFORM_DEBUG,
-        "platform": WORKERBEE_BACKEND_PLATFORM_DEBUG,
-        "platform_admin": WORKERBEE_BACKEND_PLATFORM_DEBUG,
-    }
-    return aliases.get(normalized, normalized)
-
-
-def workspace_strategy_for_backend(backend: str) -> str:
-    selected = canonical_workerbee_backend(backend)
-    if selected == WORKERBEE_BACKEND_OSS:
-        return WORKERBEE_WORKSPACE_DIRECT_HOST
-    if selected == WORKERBEE_BACKEND_USER_APPLIANCE:
-        return WORKERBEE_WORKSPACE_MANAGED_APPLIANCE
-    if selected == WORKERBEE_BACKEND_PLATFORM_DEBUG:
-        return WORKERBEE_WORKSPACE_CONTENT_IMPORT
-    raise ValueError(f"unsupported WorkerBee backend: {backend}")
-
-
-def _runtime_identity_fields(provenance: Mapping[str, Any]) -> dict[str, str]:
-    return {
-        "backend": canonical_workerbee_backend(provenance.get("backend")),
-        "endpoint": str(provenance.get("endpoint") or "").strip().rstrip("/"),
-        "server_name": str(provenance.get("server_name") or "").strip(),
-        "server_version": str(provenance.get("server_version") or "").strip(),
-        "config_path": str(provenance.get("config_path") or "").strip(),
-    }
-
-
-def runtime_fingerprint(provenance: Mapping[str, Any]) -> str:
-    fields = _runtime_identity_fields(provenance)
-    encoded = json.dumps(fields, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def _atomic_private_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -86,41 +45,6 @@ def _atomic_private_json(path: Path, payload: Mapping[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-@dataclass(frozen=True, slots=True)
-class WorkerBeeBackendDescriptor:
-    backend: str
-    label: str
-    workspace_strategy: str
-    available: bool
-    selected: bool = False
-    unavailable_reason: str = ""
-
-    def public_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True, slots=True)
-class WorkerBeeRuntimeSelection:
-    backend: str
-    endpoint: str
-    server_name: str
-    server_version: str
-    config_path: str
-    fingerprint: str
-    instance_id: str
-    generation: int
-    workspace_strategy: str
-    selected_at: float
-    observed_at: float
-    reason: str
-
-    def public_dict(self) -> dict[str, Any]:
-        return {
-            "api_version": WORKERBEE_RUNTIME_API_VERSION,
-            **asdict(self),
-        }
-
-
 class WorkerBeeRuntimeRegistry:
     """Persist the one selected WorkerBee runtime and its binding generation."""
 
@@ -130,17 +54,52 @@ class WorkerBeeRuntimeRegistry:
         *,
         clock: Callable[[], float] = time.time,
         user_appliance_available: bool = False,
+        cutover: WorkerBeeCutover | None = None,
     ) -> None:
         self.state_root = state_root.expanduser().resolve()
         self.clock = clock
         self.user_appliance_available = bool(user_appliance_available)
+        self.cutover = cutover
         self._lock = threading.RLock()
 
     @property
     def selection_path(self) -> Path:
         return self.state_root / "selected-runtime.json"
 
+    @classmethod
+    def for_daemon(cls, state_root: Path) -> WorkerBeeRuntimeRegistry:
+        return cls(state_root, cutover=WorkerBeeCutover(state_root))
+
+    def admission(self, kind: str, **scope: Any):
+        if self.cutover is None:
+            return nullcontext()
+        return self.cutover.operation(kind, **scope)
+
+    def observe_status(self, discover: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        if self.cutover is not None and self.cutover.current_operation() is not None:
+            return {}
+        try:
+            with self.admission("runtime_discovery", require_runtime=False):
+                status = discover()
+                active = status.get("active")
+                if (
+                    isinstance(active, dict) and active.get("ready") is True
+                    and active.get("backend") and active.get("endpoint")
+                ):
+                    self.observe(active, reason="selector_status")
+                return status
+        except WorkerBeeCutoverError as exc:
+            return {"error": exc.public_dict()}
+
+    @property
+    def has_durable_selection(self) -> bool:
+        return (self.state_root / DB_NAME).exists()
+
     def selected(self) -> WorkerBeeRuntimeSelection | None:
+        if self.cutover is not None:
+            return self.cutover.selected()
+        if self.has_durable_selection:
+            return read_durable_selection(self.state_root / DB_NAME)
         with self._lock:
             try:
                 payload = json.loads(self.selection_path.read_text(encoding="utf-8"))
@@ -162,6 +121,12 @@ class WorkerBeeRuntimeRegistry:
         reason: str = "observed",
         force_generation: bool = False,
     ) -> WorkerBeeRuntimeSelection:
+        if self.cutover is not None:
+            if force_generation:
+                raise ValueError("Only the fenced cutover can advance a selected generation")
+            return self.cutover.observe(provenance, reason=reason)
+        if (self.state_root / DB_NAME).exists():
+            raise ValueError("WorkerBee selection is owned by the durable cutover")
         selected_fields = _runtime_identity_fields(provenance)
         backend = selected_fields["backend"]
         if backend not in WORKERBEE_BACKENDS:
@@ -243,6 +208,7 @@ class WorkerBeeRuntimeRegistry:
         return {
             "api_version": WORKERBEE_RUNTIME_API_VERSION,
             "single_active_backend": True,
+            **({"admission": self.cutover.posture()} if self.cutover is not None else {}),
             "selected": selected.public_dict() if selected else None,
             "backends": [
                 item.public_dict()

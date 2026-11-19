@@ -487,6 +487,28 @@ class WorkerBeeWorkspaceService:
             source_mode_version=source_mode_version,
         )
 
+    def cutover_inventory_digest(self) -> str:
+        """Hash the exact persisted binding inventory without opening workspace contents."""
+        records = []
+        bindings = self.state_root / "bindings"
+        if bindings.is_symlink() or (bindings.exists() and not bindings.is_dir()):
+            raise WorkerBeeWorkspaceError(
+                "WORKERBEE_CUTOVER_BINDING_INVALID", "Workspace inventory root is unsafe.",
+            )
+        for path in sorted(bindings.glob("*.json")):
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 1_048_576:
+                raise WorkerBeeWorkspaceError(
+                    "WORKERBEE_CUTOVER_BINDING_INVALID", "Workspace inventory has an unsafe record.",
+                )
+            if len(records) >= 4096:
+                raise WorkerBeeWorkspaceError(
+                    "WORKERBEE_CUTOVER_BINDING_LIMIT", "Workspace inventory exceeds the cutover limit.",
+                )
+            records.append(self.load(path.stem).public_dict())
+        return hashlib.sha256(json.dumps(
+            records, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode()).hexdigest()
+
     def load(self, binding_id: str) -> WorkerBeeWorkspaceBinding:
         path = self._receipt_path(binding_id)
         try:

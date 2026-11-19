@@ -22,6 +22,11 @@ class _Runtime:
     def __init__(self) -> None:
         self.observed: list[tuple[dict[str, object], str]] = []
 
+    def observe_status(self, discover):
+        status = discover()
+        self.observe(status["active"], reason="selector_status")
+        return status
+
     def observe(
         self,
         payload: dict[str, object],

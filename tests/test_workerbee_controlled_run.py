@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from agent_pbx.api import create_app
 from agent_pbx.config import ServerConfig
+from agent_pbx.controller_metadata import controller_metadata_patch
 from agent_pbx.operator import OperatorService
 from agent_pbx.schemas import AgentRegisterRequest
 from agent_pbx.store import SCHEMA_VERSION, Store
@@ -18,6 +22,7 @@ from agent_pbx.workerbee_controlled_run import (
     load_controlled_run_profile,
 )
 from agent_pbx.workerbee_controlled_run_executor import WorkerBeeControlledRunExecutor
+from agent_pbx.workerbee_cutover import WorkerBeeCutoverError
 from agent_pbx.workerbee_runtime import WorkerBeeRuntimeRegistry
 
 
@@ -829,3 +834,239 @@ async def test_executor_recovers_existing_appliance_run_without_starting_it_agai
     await executor._run(str(request["request_id"]))
     assert "workerbee_v1_controlled_run_start" not in calls
     assert store.get_workerbee_controlled_run_request(request["request_id"])["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", [
+    "plan_drift", "drain_timeout", "fast_reopen", "held", "generation_drift",
+    "workspace_drift", "canceled", "lease_revoked", "exhausted_lease",
+    "lease_revoked_during_preflight", "shutdown_and_startup_recovery",
+])
+async def test_approval_admission_race_uses_owned_task_and_exact_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    app, fork_id, campaign_id = _api_app(tmp_path, monkeypatch)
+    store = app.state.store
+    executor = app.state.workerbee_controlled_run_executor
+    cutover = app.state.workerbee_runtime.cutover
+    schedule = executor.schedule
+    observed_refusal = asyncio.Event()
+    permit_wait = asyncio.Event()
+    wait_for_reopen = cutover.wait_for_reopen
+    calls: list[str] = []
+    lease_id = None
+
+    async def fake_call(_endpoint, name, arguments, **_kwargs):
+        calls.append(name)
+        if name.endswith("_preflight"):
+            if case == "lease_revoked_during_preflight":
+                store.revoke_workerbee_controlled_run_lease(lease_id, revoked_by="test")
+            return {"data": {
+                "ok": True,
+                **{key: arguments[key] for key in (
+                    "request_sha256", "profile_sha256", "tool_manifest_sha256",
+                )},
+            }}
+        if name.endswith("_start"):
+            return {"data": {"run_id": "fake-run", "workspace_id": "fake-workspace"}}
+        if name.endswith("_status"):
+            return {"data": {"status": "succeeded"}}
+        if name.endswith("_receipt"):
+            return {"data": {"cleanup": {"complete": True, "residue": []}}}
+        raise AssertionError(name)
+
+    async def note_refusal(**kwargs):
+        observed_refusal.set()
+        if case == "fast_reopen":
+            await permit_wait.wait()
+        return await wait_for_reopen(**kwargs)
+
+    monkeypatch.setattr(executor, "tool_caller", fake_call)
+    monkeypatch.setattr(cutover, "wait_for_reopen", note_refusal)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        await asyncio.to_thread(app.state.workerbee_application.refresh_runtime_selection)
+        service = app.state.workerbee_controlled_runs
+        row = service.request(
+            **_api_payload(fork_id, campaign_id), requested_by="test",
+        )["request"]
+        request_id = row["request_id"]
+        if case in {"lease_revoked", "exhausted_lease", "lease_revoked_during_preflight"}:
+            lease = store.create_workerbee_controlled_run_lease(
+                request=row, requested_by="test", max_uses=1 if case == "exhausted_lease" else 2,
+                ttl_seconds=120,
+            )
+            lease_id = lease["lease_id"]
+            store.decide_workerbee_controlled_run_lease(lease_id, approve=True, decided_by="root")
+
+        selected = cutover.selected()
+        record = {"source": selected.public_dict()}
+        transaction = "approval-race"
+        cutover.preview(transaction, "controller", record)
+
+        def schedule_then_close(approved_id):
+            assert store.get_workerbee_controlled_run_request(approved_id)["status"] == "approved"
+            assert schedule(approved_id)
+            cutover.claim(transaction, "controller", phase="previewed", selection=selected)
+            return True
+
+        monkeypatch.setattr(executor, "schedule", schedule_then_close)
+        release_read = asyncio.Event()
+        read_ready = asyncio.Event()
+
+        async def old_read():
+            with cutover.operation("old_gateway_read"):
+                read_ready.set()
+                await release_read.wait()
+
+        read = asyncio.create_task(old_read()) if case == "drain_timeout" else None
+        try:
+            if read is not None:
+                await asyncio.wait_for(read_ready.wait(), timeout=5)
+            decision = await client.post(
+                f"/v2/workerbee/controlled-runs/{request_id}/decision",
+                json={"approve": True, "decided_by": "root", "lease_id": lease_id},
+            )
+            assert decision.status_code == 200, decision.text
+            approval = decision.json()
+            task = executor._tasks[request_id]
+            await asyncio.wait_for(observed_refusal.wait(), timeout=5)
+            assert not task.done() and not calls and not schedule(request_id)
+            assert cutover.posture()["admitted"] == int(read is not None)
+            assert cutover.drain(transaction, timeout=0) is (read is None)
+            assert store.get_workerbee_controlled_run_request(request_id) == approval
+
+            if case == "held":
+                cutover.advance(transaction, "draining", "held", record, hold="test hold")
+            elif case == "generation_drift":
+                cutover.advance(
+                    transaction, "draining", "published", record,
+                    publish=replace(selected, generation=selected.generation + 1),
+                    transport_identity="e" * 64,
+                )
+                cutover.advance(transaction, "published", "verified", record, reopen=True)
+            else:
+                if case == "canceled":
+                    service.cancel(request_id, canceled_by="root", reason="fixture")
+                elif case == "workspace_drift":
+                    patch = controller_metadata_patch({"workerbee_workspace_binding_id": "other"})
+                    store.merge_agent_metadata(fork_id, patch)
+                    store.merge_operator_fork_metadata(fork_id, patch)
+                    assert store.get_agent(fork_id)["metadata"]["workerbee_workspace_binding_id"] == "other"
+                elif case == "lease_revoked":
+                    store.revoke_workerbee_controlled_run_lease(lease_id, revoked_by="root")
+                elif case == "shutdown_and_startup_recovery":
+                    await executor.stop()
+                    assert task.cancelled() and not executor._tasks
+                phase = "drain_timeout" if case == "drain_timeout" else "plan_drift"
+                cutover.advance(transaction, "draining", phase, record, reopen=True)
+        finally:
+            if read is not None:
+                release_read.set()
+                await read
+        permit_wait.set()
+
+        if case == "shutdown_and_startup_recovery":
+            assert store.get_workerbee_controlled_run_request(request_id) == approval
+            assert not calls
+            monkeypatch.setattr(executor, "schedule", schedule)
+            await executor.start()
+            task = executor._tasks[request_id]
+        await asyncio.wait_for(task, timeout=5)
+        assert not executor._tasks
+        final = store.get_workerbee_controlled_run_request(request_id)
+        if case in {"plan_drift", "drain_timeout", "fast_reopen", "exhausted_lease",
+                    "shutdown_and_startup_recovery"}:
+            assert final["status"] == "succeeded"
+            assert [name.rsplit("_", 1)[-1] for name in calls] == [
+                "preflight", "start", "status", "receipt",
+            ]
+        elif case == "lease_revoked_during_preflight":
+            assert final["error_code"] == "WORKERBEE_CONTROLLED_RUN_LEASE_STALE"
+            assert calls == ["workerbee_v1_controlled_run_preflight"]
+        else:
+            assert final == approval or (case == "canceled" and final["status"] == "canceled")
+            assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["drain", "recovery_hold", "ambiguous_start"])
+async def test_already_admitted_run_handles_gate_closure_during_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    app, fork_id, campaign_id = _api_app(tmp_path, monkeypatch)
+    store = app.state.store
+    executor = app.state.workerbee_controlled_run_executor
+    cutover = app.state.workerbee_runtime.cutover
+    closed = asyncio.Event()
+    allow_preflight_result = asyncio.Event()
+    calls: list[str] = []
+    transaction = "close-during-preflight"
+
+    async def fake_call(_endpoint, name, arguments, **_kwargs):
+        calls.append(name.rsplit("_", 1)[-1])
+        if name.endswith("_preflight"):
+            cutover.claim(transaction, "controller", phase="previewed", selection=selected)
+            if case == "recovery_hold":
+                cutover.hold("fixture recovery hold")
+            closed.set()
+            await allow_preflight_result.wait()
+            return {"data": {"ok": True, **{
+                key: arguments[key]
+                for key in ("request_sha256", "profile_sha256", "tool_manifest_sha256")
+            }}}
+        if name.endswith("_start"):
+            assert cutover.posture()["admission"] == "draining"
+            if case == "ambiguous_start":
+                raise TimeoutError("fixture lost result after dispatch")
+            return {"data": {"run_id": "fake-run"}}
+        if name.endswith("_status"):
+            return {"data": {"status": "succeeded"}}
+        if name.endswith("_receipt"):
+            return {"data": {"cleanup": {"complete": True, "residue": []}}}
+        raise AssertionError(name)
+
+    monkeypatch.setattr(executor, "tool_caller", fake_call)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        await asyncio.to_thread(app.state.workerbee_application.refresh_runtime_selection)
+        row = app.state.workerbee_controlled_runs.request(
+            **_api_payload(fork_id, campaign_id), requested_by="test",
+        )["request"]
+        request_id = row["request_id"]
+        selected = cutover.selected()
+        record = {"source": selected.public_dict()}
+        cutover.preview(transaction, "controller", record)
+        decision = await client.post(
+            f"/v2/workerbee/controlled-runs/{request_id}/decision",
+            json={"approve": True, "decided_by": "root"},
+        )
+        assert decision.status_code == 200, decision.text
+        task = executor._tasks[request_id]
+        await asyncio.wait_for(closed.wait(), timeout=5)
+        assert cutover.posture()["admitted"] == 1
+        assert not cutover.drain(transaction, timeout=0)
+        with pytest.raises(WorkerBeeCutoverError, match="admission is closed"):
+            with cutover.operation("another_run", inherit=False):
+                pytest.fail("The gate admitted a new run")
+        allow_preflight_result.set()
+        await asyncio.wait_for(task, timeout=5)
+        assert not executor._tasks
+        final = store.get_workerbee_controlled_run_request(request_id)
+        if case == "drain":
+            assert cutover.drain(transaction, timeout=0)
+            cutover.advance(transaction, "draining", "plan_drift", record, reopen=True)
+            assert cutover.posture()["admission"] == "open"
+            assert final["status"] == "succeeded"
+            assert calls == ["preflight", "start", "status", "receipt"]
+        elif case == "recovery_hold":
+            assert cutover.posture()["admission"] == "recovery_required"
+            assert final["status"] == "failed" and final["workerbee_run_id"] is None
+            assert final["error_code"] == "WORKERBEE_CUTOVER_DISPATCH_HELD"
+            assert calls == ["preflight"]
+        else:
+            assert cutover.posture()["reason"] == "uncertain_operation"
+            assert final["status"] == "recovery_required"
+            assert final["workerbee_run_id"] is None and calls == ["preflight", "start"]

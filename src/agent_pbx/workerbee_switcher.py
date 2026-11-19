@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import hashlib
 import json
 import os
@@ -18,6 +19,8 @@ from .workerbee_backend_adapter import (
     WorkerBeeSwitchBackend,
     canonical_platform_debug_posture,
 )
+from .workerbee_cutover import WorkerBeeCutover, wait_workerbee_thread
+from .workerbee_durable_switch import WorkerBeeDurableSwitch
 from .workerbee_runtime import canonical_workerbee_backend
 
 
@@ -82,6 +85,7 @@ class WorkerBeeSwitchService:
         clock: Callable[[], float] = time.time,
         which: Callable[[str], str | None] = shutil.which,
         adapter: WorkerBeeBackendAdapter | None = None,
+        cutover: WorkerBeeCutover | None = None,
     ) -> None:
         self.state_root = state_root.expanduser().resolve()
         self.clock = clock
@@ -98,13 +102,58 @@ class WorkerBeeSwitchService:
             which=which,
         )
         self._lock = threading.Lock()
+        self.cutover = cutover
+        self.durable = (
+            WorkerBeeDurableSwitch(
+                cutover, self.adapter, impact=self.impact_provider,
+                invalidate=self.cache_invalidator, clock=self.clock,
+                preview_ttl=self.preview_ttl_seconds,
+            )
+            if cutover is not None else None
+        )
+
+    @asynccontextmanager
+    async def controller_lifespan(self):
+        if self.cutover is None:
+            yield
+            return
+        await wait_workerbee_thread(self.cutover.start)
+        try:
+            await wait_workerbee_thread(self.recover_startup)
+            self.cutover.enable_serving()
+            yield
+        finally:
+            self.cutover.stop()
+
+    @property
+    def admission_open(self) -> bool:
+        return self.cutover is None or self.cutover.posture()["admission"] == "open"
+
+    def recover_startup(self) -> None:
+        if self.durable is not None:
+            self.durable.recover_startup()
 
     @property
     def platform_debug_posture(self) -> str:
         return self.adapter.platform_debug_posture
 
     def status(self) -> dict[str, Any]:
-        active = self.adapter.discover()
+        if self.cutover is None:
+            return self._status(self.adapter.discover())
+        posture = self.cutover.posture()
+        if posture["admission"] != "open":
+            selected = self.cutover.selected()
+            return {
+                "api_version": WORKERBEE_SWITCH_API_VERSION,
+                "available": False, "targets": [],
+                "active": selected.public_dict() if selected else {},
+                "admission": posture, "last_transaction": self.cutover.latest(),
+                "generation_guard_required": True,
+            }
+        with self.cutover.operation("selector_discovery", require_runtime=False):
+            return self._status(self.adapter.discover())
+
+    def _status(self, active: dict[str, Any]) -> dict[str, Any]:
         descriptors = self._descriptors()
         targets = [item.backend for item in descriptors.values() if item.available]
         impact = dict(self.impact_provider() or {})
@@ -124,7 +173,9 @@ class WorkerBeeSwitchService:
                 "observed": observed_posture,
                 "ready": posture_ready,
             },
-            "last_transaction": self._last_transaction_summary(),
+            "last_transaction": (
+                self.cutover.latest() if self.cutover is not None else self._last_transaction_summary()
+            ),
             "existing_sessions_pinned": False,
             "generation_guard_required": True,
             "impact": impact,
@@ -133,7 +184,9 @@ class WorkerBeeSwitchService:
             ],
         }
 
-    def preview(self, target: str) -> dict[str, Any]:
+    def preview(self, target: str, *, controller: str = "local") -> dict[str, Any]:
+        if self.durable is not None:
+            return self.durable.preview(target, controller=controller)
         with self._lock:
             descriptor = self._require_target(target)
             resolved_target = descriptor.backend
@@ -195,7 +248,13 @@ class WorkerBeeSwitchService:
         preview_token: str,
         confirm_target: str,
         confirm_privileged: bool = False,
+        controller: str = "local",
     ) -> dict[str, Any]:
+        if self.durable is not None:
+            return self.durable.apply(
+                transaction_id, controller=controller, preview_token=preview_token,
+                confirm_target=confirm_target, confirm_privileged=confirm_privileged,
+            )
         with self._lock:
             record = self._load(transaction_id)
             self._validate_preview(
@@ -316,7 +375,10 @@ class WorkerBeeSwitchService:
         transaction_id: str,
         *,
         confirm: bool,
+        controller: str = "local",
     ) -> dict[str, Any]:
+        if self.durable is not None:
+            return self.durable.rollback(transaction_id, controller=controller, confirm=confirm)
         if not confirm:
             raise ValueError("rollback requires explicit confirmation")
         with self._lock:
