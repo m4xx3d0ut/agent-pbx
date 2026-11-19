@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v2.7.0rc2 - 2026-11-19
+
+### Fixed
+
+- Load the Codex model catalog on the first lookup, including on a newly
+  booted host. Preserve the five-minute refresh interval and the behavior
+  when the catalog is unavailable.
+
 ## v2.7.0rc1 - 2026-11-19
 
 ### Added
